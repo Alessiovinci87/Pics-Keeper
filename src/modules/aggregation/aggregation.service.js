@@ -19,7 +19,6 @@ const AggregationService = {
 
       await this.aggregateAsinDaily(accountId, marketplaceId, dateFrom, dateTo);
       await this.aggregateAccountDaily(accountId, marketplaceId, dateFrom, dateTo);
-      await this.aggregateAccountDailyTotal(accountId, dateFrom, dateTo);
 
       await SyncLogger.complete(syncLog.id, {});
       logger.info('Aggregation completed', { accountId, marketplaceId });
@@ -165,64 +164,6 @@ const AggregationService = {
     logger.debug('Account daily KPI aggregated (per marketplace)', { accountId, marketplaceId });
   },
 
-  /**
-   * Aggregate account-level daily KPIs across ALL marketplaces (marketplace_id = NULL).
-   */
-  async aggregateAccountDailyTotal(accountId, dateFrom, dateTo) {
-    await db.query(
-      `INSERT INTO account_daily_kpi (
-        account_id, marketplace_id, kpi_date,
-        units_sold, orders_count, revenue, total_amazon_fees, refunds,
-        ads_spend, total_product_costs, net_profit,
-        margin_pct, roi_pct, acos_pct, tacos_pct, currency, computed_at
-      )
-      SELECT
-        account_id,
-        NULL AS marketplace_id,
-        kpi_date,
-        SUM(units_sold),
-        SUM(orders_count),
-        SUM(revenue),
-        SUM(total_amazon_fees),
-        SUM(refunds),
-        SUM(ads_spend),
-        SUM(total_product_costs),
-        SUM(net_profit),
-        CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4) ELSE 0 END,
-        CASE WHEN SUM(total_product_costs + ads_spend) > 0
-          THEN ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4) ELSE 0 END,
-        CASE WHEN SUM(ads_spend) > 0 AND SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
-        CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
-        'EUR',
-        NOW()
-      FROM account_daily_kpi
-      WHERE account_id = $1
-        AND marketplace_id IS NOT NULL
-        AND kpi_date >= $2 AND kpi_date < $3
-      GROUP BY account_id, kpi_date
-      ON CONFLICT (account_id, marketplace_id, kpi_date) DO UPDATE SET
-        units_sold = EXCLUDED.units_sold,
-        orders_count = EXCLUDED.orders_count,
-        revenue = EXCLUDED.revenue,
-        total_amazon_fees = EXCLUDED.total_amazon_fees,
-        refunds = EXCLUDED.refunds,
-        ads_spend = EXCLUDED.ads_spend,
-        total_product_costs = EXCLUDED.total_product_costs,
-        net_profit = EXCLUDED.net_profit,
-        margin_pct = EXCLUDED.margin_pct,
-        roi_pct = EXCLUDED.roi_pct,
-        acos_pct = EXCLUDED.acos_pct,
-        tacos_pct = EXCLUDED.tacos_pct,
-        computed_at = NOW()`,
-      [accountId, dateFrom, dateTo]
-    );
-
-    logger.debug('Account daily KPI aggregated (all marketplaces)', { accountId });
-  },
-
   // ---- Query methods for API ----
 
   /**
@@ -286,9 +227,11 @@ const AggregationService = {
 
   /**
    * Get account dashboard data: daily KPIs.
+   * When marketplaceId is provided, queries per-marketplace rows directly.
+   * When marketplaceId is omitted, dynamically aggregates across all marketplaces.
    */
   async getAccountDashboard({ accountId, marketplaceId, dateFrom, dateTo }) {
-    const conditions = ['adk.account_id = $1'];
+    const conditions = ['adk.account_id = $1', 'adk.marketplace_id IS NOT NULL'];
     const params = [accountId];
     let idx = 2;
 
@@ -296,8 +239,6 @@ const AggregationService = {
       conditions.push(`adk.marketplace_id = $${idx}`);
       params.push(marketplaceId);
       idx++;
-    } else {
-      conditions.push('adk.marketplace_id IS NULL'); // aggregated across all marketplaces
     }
 
     if (dateFrom) {
@@ -311,16 +252,54 @@ const AggregationService = {
       idx++;
     }
 
-    const result = await db.query(
-      `SELECT adk.*, m.country_code, m.name AS marketplace_name
-       FROM account_daily_kpi adk
-       LEFT JOIN marketplaces m ON m.id = adk.marketplace_id
-       WHERE ${conditions.join(' AND ')}
-       ORDER BY adk.kpi_date DESC`,
-      params
-    );
+    const whereClause = conditions.join(' AND ');
 
-    // Also get summary totals
+    let result;
+    if (marketplaceId) {
+      result = await db.query(
+        `SELECT adk.*, m.country_code, m.name AS marketplace_name
+         FROM account_daily_kpi adk
+         LEFT JOIN marketplaces m ON m.id = adk.marketplace_id
+         WHERE ${whereClause}
+         ORDER BY adk.kpi_date DESC`,
+        params
+      );
+    } else {
+      // Dynamically aggregate across all marketplaces per date
+      result = await db.query(
+        `SELECT
+          adk.account_id,
+          NULL::INTEGER AS marketplace_id,
+          adk.kpi_date,
+          SUM(adk.units_sold)::INTEGER AS units_sold,
+          SUM(adk.orders_count)::INTEGER AS orders_count,
+          SUM(adk.revenue) AS revenue,
+          SUM(adk.total_amazon_fees) AS total_amazon_fees,
+          SUM(adk.refunds) AS refunds,
+          SUM(adk.ads_spend) AS ads_spend,
+          SUM(adk.total_product_costs) AS total_product_costs,
+          SUM(adk.net_profit) AS net_profit,
+          CASE WHEN SUM(adk.revenue) > 0
+            THEN ROUND((SUM(adk.net_profit) / SUM(adk.revenue)) * 100, 4) ELSE 0 END AS margin_pct,
+          CASE WHEN SUM(adk.total_product_costs + adk.ads_spend) > 0
+            THEN ROUND((SUM(adk.net_profit) / SUM(adk.total_product_costs + adk.ads_spend)) * 100, 4) ELSE 0 END AS roi_pct,
+          CASE WHEN SUM(adk.revenue) > 0
+            THEN ROUND((SUM(adk.ads_spend) / SUM(adk.revenue)) * 100, 4) ELSE 0 END AS acos_pct,
+          CASE WHEN SUM(adk.revenue) > 0
+            THEN ROUND((SUM(adk.ads_spend) / SUM(adk.revenue)) * 100, 4) ELSE 0 END AS tacos_pct,
+          NULL AS currency,
+          MAX(adk.computed_at) AS computed_at,
+          NULL AS country_code,
+          NULL AS marketplace_name
+         FROM account_daily_kpi adk
+         WHERE ${whereClause}
+         GROUP BY adk.account_id, adk.kpi_date
+         ORDER BY adk.kpi_date DESC`,
+        params
+      );
+    }
+
+    // Summary totals (works for both cases using the same WHERE)
     const summary = await db.query(
       `SELECT
         SUM(units_sold) AS total_units,
@@ -335,7 +314,7 @@ const AggregationService = {
           THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 2)
           ELSE 0 END AS avg_tacos
        FROM account_daily_kpi adk
-       WHERE ${conditions.join(' AND ')}`,
+       WHERE ${whereClause}`,
       params
     );
 
