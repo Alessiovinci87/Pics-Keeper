@@ -220,9 +220,8 @@ const FinancialService = {
         event_type, fee_type, amount, currency,
         event_date, posted_date, raw_data
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      ON CONFLICT (account_id, amazon_order_id, event_type, fee_type, event_date)
+      ON CONFLICT (account_id, amazon_order_id, event_type, fee_type, amount, posted_date)
       DO UPDATE SET
-        amount = EXCLUDED.amount,
         raw_data = EXCLUDED.raw_data,
         synced_at = NOW()
       RETURNING (xmax = 0) AS is_insert`,

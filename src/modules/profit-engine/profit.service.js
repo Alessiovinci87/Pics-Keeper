@@ -1,8 +1,9 @@
 const db = require('../../database/pool');
 const logger = require('../../utils/logger');
-const { round, pct, roi, toDateStr } = require('../../utils/helpers');
-const AdsService = require('../ads/ads.service');
+const { round, pct, roi, toDateStr, chunk } = require('../../utils/helpers');
 const SyncLogger = require('../../services/sync-logger');
+
+const BATCH_SIZE = 1000;
 
 /**
  * Profit Engine - computes net profit for each order line.
@@ -28,13 +29,35 @@ const SyncLogger = require('../../services/sync-logger');
 const ProfitService = {
   /**
    * Recompute profit for all orders in a date range for one account+marketplace.
+   * Uses advisory lock to prevent concurrent runs for the same account+marketplace.
+   * Processes orders in batches of BATCH_SIZE, each wrapped in a transaction.
    */
   async computeForRange(accountId, marketplaceId, dateFrom, dateTo) {
     const syncLog = await SyncLogger.start(accountId, marketplaceId, 'profit');
     let processed = 0;
 
+    // Acquire advisory lock to prevent concurrent computation for same account+marketplace
+    const lockKey = accountId * 100000 + marketplaceId;
+    const lockResult = await db.query('SELECT pg_try_advisory_lock($1) AS acquired', [lockKey]);
+    if (!lockResult.rows[0].acquired) {
+      const msg = `Profit computation already running for account ${accountId}, marketplace ${marketplaceId}`;
+      logger.warn(msg);
+      await SyncLogger.fail(syncLog.id, msg);
+      return { processed: 0, skipped: true };
+    }
+
     try {
       logger.info('Starting profit computation', { accountId, marketplaceId, dateFrom, dateTo });
+
+      // Pre-fetch all lookup data in parallel (bulk queries, no N+1)
+      const [feeMap, costsMap, unitsByDay, storageMap, adsSpendMap, refundMap] = await Promise.all([
+        this.buildFeeMap(accountId, marketplaceId, dateFrom, dateTo),
+        this.buildCostsMap(accountId, marketplaceId),
+        this.buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo),
+        this.buildStorageMap(accountId, marketplaceId, dateFrom, dateTo),
+        this.buildAdsSpendMap(accountId, marketplaceId, dateFrom, dateTo),
+        this.buildRefundMap(accountId, marketplaceId, dateFrom, dateTo),
+      ]);
 
       // Get all orders in range
       const ordersResult = await db.query(
@@ -46,25 +69,18 @@ const ProfitService = {
         [accountId, marketplaceId, dateFrom, dateTo]
       );
 
-      // Pre-fetch financial events for all orders in range
-      const feeMap = await this.buildFeeMap(accountId, marketplaceId, dateFrom, dateTo);
+      // Process in batches, each wrapped in a transaction
+      const batches = chunk(ordersResult.rows, BATCH_SIZE);
 
-      // Pre-fetch ASIN costs
-      const costsMap = await this.buildCostsMap(accountId, marketplaceId);
-
-      // Pre-fetch units sold per ASIN per day (for ads allocation)
-      const unitsByDay = await this.buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo);
-
-      // Pre-fetch storage allocation data (units sold per ASIN this month)
-      const storageMap = await this.buildStorageMap(accountId, marketplaceId, dateFrom, dateTo);
-
-      for (const order of ordersResult.rows) {
-        await this.computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap);
-        processed++;
+      for (const batch of batches) {
+        await db.transaction(async (client) => {
+          for (const order of batch) {
+            await this.computeOrderProfit(client, order, feeMap, costsMap, unitsByDay, storageMap, adsSpendMap, refundMap);
+            processed++;
+          }
+        });
+        logger.debug('Batch committed', { accountId, marketplaceId, batchSize: batch.length, processed });
       }
-
-      // Process refunds: allocate to the actual refund event date
-      await this.processRefunds(accountId, marketplaceId, dateFrom, dateTo);
 
       await SyncLogger.complete(syncLog.id, { processed, inserted: processed, updated: 0 });
 
@@ -74,11 +90,14 @@ const ProfitService = {
       await SyncLogger.fail(syncLog.id, err.message);
       logger.error('Profit computation failed', { accountId, error: err.message });
       throw err;
+    } finally {
+      // Always release advisory lock
+      await db.query('SELECT pg_advisory_unlock($1)', [lockKey]);
     }
   },
 
   /**
-   * Build a map of Amazon fees by order_id -> fee_type -> amount.
+   * Build a map of Amazon fees by order_id:asin -> fee_type -> amount.
    */
   async buildFeeMap(accountId, marketplaceId, dateFrom, dateTo) {
     const result = await db.query(
@@ -142,10 +161,10 @@ const ProfitService = {
   },
 
   /**
-   * Build storage allocation map: asin -> units_sold_this_month.
+   * Build storage allocation map: asin:YYYY-MM -> units_sold_that_month.
+   * Each month is computed independently — no cross-month mixing.
    */
   async buildStorageMap(accountId, marketplaceId, dateFrom, dateTo) {
-    // Get the month boundaries from the date range
     const result = await db.query(
       `SELECT asin,
         DATE_TRUNC('month', purchase_date) AS month,
@@ -169,9 +188,57 @@ const ProfitService = {
   },
 
   /**
-   * Compute and upsert profit for a single order line.
+   * Bulk pre-fetch ads spend: asin:date -> total_spend.
+   * Replaces per-order AdsService.getDailySpendByAsin calls (N+1 elimination).
    */
-  async computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap) {
+  async buildAdsSpendMap(accountId, marketplaceId, dateFrom, dateTo) {
+    const result = await db.query(
+      `SELECT asin, spend_date, SUM(spend) AS total_spend
+       FROM ads_daily_spend
+       WHERE account_id = $1 AND marketplace_id = $2
+         AND spend_date >= $3::date AND spend_date < $4::date
+       GROUP BY asin, spend_date`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+
+    const map = {};
+    for (const row of result.rows) {
+      const key = `${row.asin}:${toDateStr(row.spend_date)}`;
+      map[key] = parseFloat(row.total_spend);
+    }
+    return map;
+  },
+
+  /**
+   * Bulk pre-fetch refund totals: order_id:asin -> refund_amount.
+   * Replaces separate processRefunds pass (N+1 elimination).
+   */
+  async buildRefundMap(accountId, marketplaceId, dateFrom, dateTo) {
+    const result = await db.query(
+      `SELECT amazon_order_id, asin, SUM(amount) AS refund_total
+       FROM financial_events_raw
+       WHERE account_id = $1 AND marketplace_id = $2
+         AND event_type = 'RefundEvent'
+         AND event_date >= $3 AND event_date < $4
+       GROUP BY amazon_order_id, asin`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+
+    const map = {};
+    for (const row of result.rows) {
+      if (!row.amazon_order_id) continue;
+      const key = `${row.amazon_order_id}:${row.asin}`;
+      map[key] = round(Math.abs(parseFloat(row.refund_total)), 4);
+    }
+    return map;
+  },
+
+  /**
+   * Compute and upsert profit for a single order line.
+   * All lookups are O(1) from pre-built maps. No service calls inside loop.
+   * Refund is included in a clean total_costs calculation (no incremental mutation).
+   */
+  async computeOrderProfit(client, order, feeMap, costsMap, unitsByDay, storageMap, adsSpendMap, refundMap) {
     const orderDate = toDateStr(order.purchase_date);
     const feeKey = `${order.amazon_order_id}:${order.asin}`;
     const fees = feeMap[feeKey] || {};
@@ -206,13 +273,11 @@ const ProfitService = {
     }
     otherFees = round(otherFees, 4);
 
-    // Ads allocation: (daily_ads_spend / daily_units_sold) * order_quantity
+    // Ads allocation: O(1) lookup from pre-built map (no per-order DB query)
     const dayKey = `${order.asin}:${orderDate}`;
     const unitsDay = unitsByDay[dayKey] || 1;
-    const adsData = await AdsService.getDailySpendByAsin(
-      order.account_id, order.marketplace_id, order.asin, orderDate
-    );
-    const adsAllocated = round((parseFloat(adsData.total_spend) / unitsDay) * qty, 4);
+    const dailyAdsSpend = adsSpendMap[dayKey] || 0;
+    const adsAllocated = round((dailyAdsSpend / unitsDay) * qty, 4);
 
     // Product costs (per unit * quantity)
     const productCost = round(parseFloat(costs.product_cost || 0) * qty, 4);
@@ -221,25 +286,31 @@ const ProfitService = {
     const prepCost = round(parseFloat(costs.prep_cost || 0) * qty, 4);
     const packagingCost = round(parseFloat(costs.packaging_cost || 0) * qty, 4);
 
-    // Storage allocation: (monthly_storage_cost / units_sold_month) * quantity
+    // Storage allocation: uses correct month bucket per order (no cross-month mixing)
     const monthKey = `${order.asin}:${orderDate.substring(0, 7)}`;
     const unitsMonth = storageMap[monthKey] || 1;
     const storageMonthly = parseFloat(costs.storage_monthly_cost || 0);
     const storageAllocated = round((storageMonthly / unitsMonth) * qty, 4);
 
-    // Totals
-    const totalCosts = round(
+    // Refund: O(1) lookup from pre-built map
+    const refundAmount = refundMap[feeKey] || 0;
+
+    // Clean total_costs calculation (NOT incremental mutation):
+    // total_costs = base_costs + refund_amount
+    const baseCosts = round(
       referralFee + fbaFee + otherFees + adsAllocated +
       productCost + inboundCost + customsCost + prepCost + packagingCost + storageAllocated
     , 4);
+    const totalCosts = round(baseCosts + refundAmount, 4);
 
+    // net_profit = revenue - total_costs
     const netProfit = round(revenue - totalCosts, 4);
     const marginPct = pct(netProfit, revenue, 4);
     const investedCost = productCost + inboundCost + customsCost + prepCost + packagingCost + storageAllocated + adsAllocated;
     const roiPct = roi(netProfit, investedCost, 4);
 
-    // Upsert
-    await db.query(
+    // Upsert using transaction client
+    await client.query(
       `INSERT INTO order_profit (
         account_id, marketplace_id, amazon_order_id, asin, order_date, quantity,
         revenue, referral_fee, fba_fee, other_amazon_fees,
@@ -253,6 +324,7 @@ const ProfitService = {
         referral_fee = EXCLUDED.referral_fee,
         fba_fee = EXCLUDED.fba_fee,
         other_amazon_fees = EXCLUDED.other_amazon_fees,
+        refund_amount = EXCLUDED.refund_amount,
         ads_allocated = EXCLUDED.ads_allocated,
         product_cost = EXCLUDED.product_cost,
         inbound_cost = EXCLUDED.inbound_cost,
@@ -269,56 +341,12 @@ const ProfitService = {
         order.account_id, order.marketplace_id, order.amazon_order_id, order.asin,
         orderDate, qty,
         revenue, referralFee, fbaFee, otherFees,
-        0, // refund_amount handled separately
+        refundAmount,
         adsAllocated,
         productCost, inboundCost, customsCost, prepCost, packagingCost, storageAllocated,
         totalCosts, netProfit, marginPct, roiPct, order.currency,
       ]
     );
-  },
-
-  /**
-   * Process refunds: update order_profit with refund amounts on the actual refund event date.
-   * This is separate from the main profit calculation because refunds happen
-   * at a different time than the original order.
-   */
-  async processRefunds(accountId, marketplaceId, dateFrom, dateTo) {
-    // Get all refund events in the date range
-    const refunds = await db.query(
-      `SELECT amazon_order_id, asin, SUM(amount) AS refund_total
-       FROM financial_events_raw
-       WHERE account_id = $1 AND marketplace_id = $2
-         AND event_type = 'RefundEvent'
-         AND event_date >= $3 AND event_date < $4
-       GROUP BY amazon_order_id, asin`,
-      [accountId, marketplaceId, dateFrom, dateTo]
-    );
-
-    for (const refund of refunds.rows) {
-      if (!refund.amazon_order_id) continue;
-
-      const refundAmount = round(Math.abs(parseFloat(refund.refund_total)), 4);
-
-      // Update the order_profit record with refund amount, then recalculate totals
-      await db.query(
-        `UPDATE order_profit SET
-          refund_amount = $1,
-          total_costs = total_costs + $1,
-          net_profit = revenue - (total_costs + $1),
-          margin_pct = CASE WHEN revenue > 0
-            THEN ROUND(((revenue - (total_costs + $1)) / revenue) * 100, 4)
-            ELSE 0 END,
-          computed_at = NOW()
-        WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,
-        [refundAmount, accountId, refund.amazon_order_id, refund.asin]
-      );
-    }
-
-    logger.info('Refunds processed', {
-      accountId,
-      marketplaceId,
-      refundsCount: refunds.rows.length,
-    });
   },
 
   /**
