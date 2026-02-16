@@ -93,7 +93,7 @@ async function syncFinancialJob() {
  */
 async function syncAdsJob() {
   await withLock('sync-ads', async () => {
-    const targets = await AccountService.getActiveSyncTargets();
+    const targets = await AccountService.getAdsSyncTargets();
     for (const target of targets) {
       try {
         await AdsService.syncAds(target);

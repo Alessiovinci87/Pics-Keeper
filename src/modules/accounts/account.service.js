@@ -23,7 +23,8 @@ const AccountService = {
               'last_orders_sync_at', am.last_orders_sync_at,
               'last_financial_sync_at', am.last_financial_sync_at,
               'last_ads_sync_at', am.last_ads_sync_at,
-              'sync_status', am.sync_status
+              'sync_status', am.sync_status,
+              'ads_sync_enabled', am.ads_sync_enabled
             )
           ) FILTER (WHERE m.id IS NOT NULL),
           '[]'
@@ -133,7 +134,8 @@ const AccountService = {
         m.currency,
         am.last_orders_sync_at,
         am.last_financial_sync_at,
-        am.last_ads_sync_at
+        am.last_ads_sync_at,
+        am.ads_sync_enabled
       FROM accounts a
       JOIN account_marketplaces am ON am.account_id = a.id AND am.is_active = TRUE
       JOIN marketplaces m ON m.id = am.marketplace_id
@@ -141,6 +143,48 @@ const AccountService = {
       ORDER BY a.id, m.id
     `);
     return result.rows;
+  },
+
+  /**
+   * Get active account+marketplace combos that have ads sync enabled.
+   */
+  async getAdsSyncTargets() {
+    const result = await db.query(`
+      SELECT
+        a.id AS account_id,
+        a.seller_id,
+        a.ads_api_refresh_token,
+        a.ads_profile_ids,
+        am.marketplace_id AS account_marketplace_id,
+        m.marketplace_id AS amazon_marketplace_id,
+        m.country_code,
+        m.region,
+        m.currency,
+        am.last_ads_sync_at
+      FROM accounts a
+      JOIN account_marketplaces am ON am.account_id = a.id AND am.is_active = TRUE
+      JOIN marketplaces m ON m.id = am.marketplace_id
+      WHERE a.is_active = TRUE
+        AND am.ads_sync_enabled = TRUE
+        AND a.ads_api_refresh_token IS NOT NULL
+      ORDER BY a.id, m.id
+    `);
+    return result.rows;
+  },
+
+  /**
+   * Enable or disable ads sync for a specific account+marketplace.
+   */
+  async setAdsSyncEnabled(accountId, marketplaceId, enabled) {
+    const result = await db.query(
+      `UPDATE account_marketplaces
+       SET ads_sync_enabled = $1
+       WHERE account_id = $2 AND marketplace_id = $3
+       RETURNING *`,
+      [enabled, accountId, marketplaceId]
+    );
+    if (result.rows.length === 0) throw new NotFoundError('Account marketplace');
+    return result.rows[0];
   },
 
   /**

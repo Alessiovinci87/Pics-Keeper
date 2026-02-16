@@ -45,4 +45,25 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
+// PUT /api/accounts/:id/marketplaces/:marketplaceId/ads-sync
+// Enable or disable ads sync for a specific marketplace
+router.put('/:id/marketplaces/:marketplaceId/ads-sync', async (req, res, next) => {
+  try {
+    const accountId = parseInt(req.params.id, 10);
+    const marketplaceId = parseInt(req.params.marketplaceId, 10);
+    const { enabled } = req.body;
+
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({
+        error: { message: 'Request body must include "enabled" as a boolean' },
+      });
+    }
+
+    const result = await AccountService.setAdsSyncEnabled(accountId, marketplaceId, enabled);
+    res.json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
