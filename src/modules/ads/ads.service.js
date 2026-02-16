@@ -11,6 +11,84 @@ const SyncLogger = require('../../services/sync-logger');
  */
 const AdsService = {
   /**
+   * Connect an Amazon Advertising account by saving the refresh token
+   * and fetching advertising profiles.
+   */
+  async connectAccount(accountId, refreshToken) {
+    // Verify account exists
+    const accountResult = await db.query(
+      'SELECT id FROM accounts WHERE id = $1',
+      [accountId]
+    );
+    if (accountResult.rows.length === 0) {
+      const { NotFoundError } = require('../../utils/errors');
+      throw new NotFoundError('Account');
+    }
+
+    // Save refresh token
+    await db.query(
+      'UPDATE accounts SET ads_api_refresh_token = $1 WHERE id = $2',
+      [refreshToken, accountId]
+    );
+
+    // Build a minimal target for AdsApiClient
+    const target = { ads_api_refresh_token: refreshToken };
+
+    const adsClient = new AdsApiClient(target);
+
+    let rawProfiles;
+    try {
+      rawProfiles = await adsClient.request('GET', '/v2/profiles');
+    } catch (err) {
+      const { ExternalApiError } = require('../../utils/errors');
+      const isAuthError =
+        err.response?.status === 401 ||
+        err.message?.includes('invalid_grant') ||
+        err.message?.includes('authorization_code');
+
+      if (isAuthError) {
+        logger.error('Invalid refresh token for ads connect', {
+          accountId,
+          status: err.response?.status,
+        });
+        throw new ExternalApiError(
+          'Amazon Advertising',
+          'Invalid or expired refresh token'
+        );
+      }
+
+      logger.error('Failed to fetch advertising profiles', {
+        accountId,
+        error: err.message,
+      });
+      throw new ExternalApiError(
+        'Amazon Advertising',
+        'Failed to fetch advertising profiles'
+      );
+    }
+
+    // Normalize profiles
+    const profiles = (Array.isArray(rawProfiles) ? rawProfiles : []).map((p) => ({
+      countryCode: p.countryCode,
+      profileId: String(p.profileId),
+      accountName: p.accountInfo?.name || p.accountInfo?.id || '',
+    }));
+
+    // Save profiles
+    await db.query(
+      'UPDATE accounts SET ads_profile_ids = $1 WHERE id = $2',
+      [JSON.stringify(profiles), accountId]
+    );
+
+    logger.info('Amazon Ads account connected', {
+      accountId,
+      profileCount: profiles.length,
+    });
+
+    return { profiles };
+  },
+
+  /**
    * Sync ads data for a single account+marketplace.
    */
   async syncAds(target) {
