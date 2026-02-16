@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const config = require('./config');
 const routes = require('./routes');
 const errorHandler = require('./middleware/error-handler');
 const logger = require('./utils/logger');
@@ -11,7 +12,7 @@ const app = express();
 // Security middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: config.corsOrigin,
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));

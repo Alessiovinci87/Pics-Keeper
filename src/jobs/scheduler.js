@@ -45,7 +45,13 @@ async function withLock(jobName, fn) {
  */
 async function syncOrdersJob() {
   await withLock('sync-orders', async () => {
-    const targets = await AccountService.getActiveSyncTargets();
+    let targets;
+    try {
+      targets = await AccountService.getActiveSyncTargets();
+    } catch (err) {
+      logger.error('Failed to fetch sync targets for orders', { error: err.message });
+      return;
+    }
     for (const target of targets) {
       try {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
@@ -70,7 +76,13 @@ async function syncOrdersJob() {
  */
 async function syncFinancialJob() {
   await withLock('sync-financial', async () => {
-    const targets = await AccountService.getActiveSyncTargets();
+    let targets;
+    try {
+      targets = await AccountService.getActiveSyncTargets();
+    } catch (err) {
+      logger.error('Failed to fetch sync targets for financial', { error: err.message });
+      return;
+    }
     for (const target of targets) {
       try {
         await FinancialService.syncFinancialEvents(target);
@@ -90,10 +102,17 @@ async function syncFinancialJob() {
 
 /**
  * Sync ads spend for all active account+marketplace combos.
+ * Uses getAdsSyncTargets() which safely handles the optional ads_sync_enabled column.
  */
 async function syncAdsJob() {
   await withLock('sync-ads', async () => {
-    const targets = await AccountService.getAdsSyncTargets();
+    let targets;
+    try {
+      targets = await AccountService.getAdsSyncTargets();
+    } catch (err) {
+      logger.error('Failed to fetch ads sync targets', { error: err.message });
+      return;
+    }
     for (const target of targets) {
       try {
         await AdsService.syncAds(target);
@@ -117,7 +136,13 @@ async function syncAdsJob() {
  */
 async function computeAndAggregateJob() {
   await withLock('compute-aggregate', async () => {
-    const targets = await AccountService.getActiveSyncTargets();
+    let targets;
+    try {
+      targets = await AccountService.getActiveSyncTargets();
+    } catch (err) {
+      logger.error('Failed to fetch sync targets for compute-aggregate', { error: err.message });
+      return;
+    }
     const dateFrom = dayjs.utc().subtract(7, 'day').format('YYYY-MM-DD');
     const dateTo = dayjs.utc().add(1, 'day').format('YYYY-MM-DD');
 
@@ -151,7 +176,13 @@ async function computeAndAggregateJob() {
  */
 async function alertsJob() {
   await withLock('alerts', async () => {
-    const targets = await AccountService.getActiveSyncTargets();
+    let targets;
+    try {
+      targets = await AccountService.getActiveSyncTargets();
+    } catch (err) {
+      logger.error('Failed to fetch sync targets for alerts', { error: err.message });
+      return;
+    }
     const seenAccounts = new Set();
 
     for (const target of targets) {

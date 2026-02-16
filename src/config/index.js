@@ -1,8 +1,9 @@
-require('dotenv').config();
+// dotenv must be loaded in src/server.js before this module is required.
 
 const config = {
   port: parseInt(process.env.PORT, 10) || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
+  corsOrigin: process.env.CORS_ORIGIN || '*',
 
   db: {
     host: process.env.DB_HOST || 'localhost',
@@ -20,8 +21,9 @@ const config = {
   },
 
   adsApi: {
-    clientId: process.env.ADS_API_CLIENT_ID || '',
-    clientSecret: process.env.ADS_API_CLIENT_SECRET || '',
+    clientId: process.env.AMAZON_ADS_CLIENT_ID || '',
+    clientSecret: process.env.AMAZON_ADS_CLIENT_SECRET || '',
+    refreshToken: process.env.AMAZON_ADS_REFRESH_TOKEN || '',
   },
 
   cron: {
@@ -34,5 +36,19 @@ const config = {
 
   logLevel: process.env.LOG_LEVEL || 'info',
 };
+
+// Fail-fast validation for required environment variables
+const required = [
+  ['DB_HOST', config.db.host],
+  ['DB_NAME', config.db.database],
+];
+
+const missing = required
+  .filter(([, value]) => !value)
+  .map(([name]) => name);
+
+if (missing.length > 0) {
+  throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+}
 
 module.exports = config;

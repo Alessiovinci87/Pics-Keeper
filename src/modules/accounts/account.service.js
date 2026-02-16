@@ -3,14 +3,46 @@ const logger = require('../../utils/logger');
 const { NotFoundError, ValidationError } = require('../../utils/errors');
 
 /**
+ * Cached result for ads_sync_enabled column existence check.
+ * null = not yet checked, true/false = cached result.
+ */
+let _adsSyncColumnExists = null;
+
+/**
+ * Check whether the ads_sync_enabled column exists on account_marketplaces.
+ * Result is cached for the lifetime of the process.
+ */
+async function hasAdsSyncColumn() {
+  if (_adsSyncColumnExists !== null) return _adsSyncColumnExists;
+  try {
+    const result = await db.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'account_marketplaces'
+        AND column_name = 'ads_sync_enabled'
+      LIMIT 1
+    `);
+    _adsSyncColumnExists = result.rows.length > 0;
+  } catch {
+    _adsSyncColumnExists = false;
+  }
+  return _adsSyncColumnExists;
+}
+
+/**
  * Account Service - manages seller accounts and their marketplace associations.
  */
 const AccountService = {
   /**
    * List all accounts (with optional active filter).
+   * Safely handles optional ads_sync_enabled column.
    */
   async list({ activeOnly = true } = {}) {
     const where = activeOnly ? 'WHERE a.is_active = TRUE' : '';
+    const hasCol = await hasAdsSyncColumn();
+    const adsSyncField = hasCol
+      ? "'ads_sync_enabled', am.ads_sync_enabled,"
+      : '';
+
     const result = await db.query(`
       SELECT a.*,
         COALESCE(
@@ -24,7 +56,8 @@ const AccountService = {
               'last_financial_sync_at', am.last_financial_sync_at,
               'last_ads_sync_at', am.last_ads_sync_at,
               'sync_status', am.sync_status,
-              'ads_sync_enabled', am.ads_sync_enabled
+              ${adsSyncField}
+              'id', am.id
             )
           ) FILTER (WHERE m.id IS NOT NULL),
           '[]'
@@ -118,6 +151,7 @@ const AccountService = {
 
   /**
    * Get all active account+marketplace combos for sync jobs.
+   * Does NOT reference ads_sync_enabled to avoid crashes when the column is missing.
    */
   async getActiveSyncTargets() {
     const result = await db.query(`
@@ -134,48 +168,69 @@ const AccountService = {
         m.currency,
         am.last_orders_sync_at,
         am.last_financial_sync_at,
-        am.last_ads_sync_at,
-        am.ads_sync_enabled
-      FROM accounts a
-      JOIN account_marketplaces am ON am.account_id = a.id AND am.is_active = TRUE
-      JOIN marketplaces m ON m.id = am.marketplace_id
-      WHERE a.is_active = TRUE
-      ORDER BY a.id, m.id
-    `);
-    return result.rows;
-  },
-
-  /**
-   * Get active account+marketplace combos that have ads sync enabled.
-   */
-  async getAdsSyncTargets() {
-    const result = await db.query(`
-      SELECT
-        a.id AS account_id,
-        a.seller_id,
-        a.ads_api_refresh_token,
-        a.ads_profile_ids,
-        am.marketplace_id AS account_marketplace_id,
-        m.marketplace_id AS amazon_marketplace_id,
-        m.country_code,
-        m.region,
-        m.currency,
         am.last_ads_sync_at
       FROM accounts a
       JOIN account_marketplaces am ON am.account_id = a.id AND am.is_active = TRUE
       JOIN marketplaces m ON m.id = am.marketplace_id
       WHERE a.is_active = TRUE
-        AND am.ads_sync_enabled = TRUE
-        AND a.ads_api_refresh_token IS NOT NULL
       ORDER BY a.id, m.id
     `);
     return result.rows;
   },
 
   /**
+   * Get sync targets for ads jobs.
+   * Safely handles the optional ads_sync_enabled column on account_marketplaces.
+   * If the column exists, only returns rows where ads_sync_enabled = TRUE.
+   * If the column does not exist, falls back to all active targets.
+   */
+  async getAdsSyncTargets() {
+    try {
+      const hasCol = await hasAdsSyncColumn();
+
+      const adsSyncFilter = hasCol
+        ? 'AND am.ads_sync_enabled = TRUE'
+        : '';
+
+      const result = await db.query(`
+        SELECT
+          a.id AS account_id,
+          a.seller_id,
+          a.sp_api_refresh_token,
+          a.ads_api_refresh_token,
+          a.ads_profile_ids,
+          am.marketplace_id AS account_marketplace_id,
+          m.marketplace_id AS amazon_marketplace_id,
+          m.country_code,
+          m.region,
+          m.currency,
+          am.last_orders_sync_at,
+          am.last_financial_sync_at,
+          am.last_ads_sync_at
+        FROM accounts a
+        JOIN account_marketplaces am ON am.account_id = a.id AND am.is_active = TRUE ${adsSyncFilter}
+        JOIN marketplaces m ON m.id = am.marketplace_id
+        WHERE a.is_active = TRUE
+          AND a.ads_api_refresh_token IS NOT NULL
+        ORDER BY a.id, m.id
+      `);
+      return result.rows;
+    } catch (err) {
+      logger.warn('getAdsSyncTargets failed, falling back to getActiveSyncTargets', { error: err.message });
+      return this.getActiveSyncTargets();
+    }
+  },
+
+  /**
    * Enable or disable ads sync for a specific account+marketplace.
+   * No-op if the ads_sync_enabled column does not exist yet.
    */
   async setAdsSyncEnabled(accountId, marketplaceId, enabled) {
+    const hasCol = await hasAdsSyncColumn();
+    if (!hasCol) {
+      logger.warn('ads_sync_enabled column does not exist, skipping setAdsSyncEnabled');
+      return null;
+    }
     const result = await db.query(
       `UPDATE account_marketplaces
        SET ads_sync_enabled = $1
