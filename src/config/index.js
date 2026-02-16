@@ -1,8 +1,15 @@
-require('dotenv').config();
+const required = (name) => {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+};
 
 const config = {
   port: parseInt(process.env.PORT, 10) || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
+  corsOrigin: process.env.CORS_ORIGIN || '*',
 
   db: {
     host: process.env.DB_HOST || 'localhost',
@@ -20,8 +27,8 @@ const config = {
   },
 
   adsApi: {
-    clientId: process.env.ADS_API_CLIENT_ID || '',
-    clientSecret: process.env.ADS_API_CLIENT_SECRET || '',
+    clientId: required('AMAZON_ADS_CLIENT_ID'),
+    clientSecret: required('AMAZON_ADS_CLIENT_SECRET'),
   },
 
   cron: {

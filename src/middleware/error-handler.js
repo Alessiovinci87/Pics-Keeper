@@ -1,4 +1,5 @@
 const logger = require('../utils/logger');
+const config = require('../config');
 const { AppError } = require('../utils/errors');
 
 /**
@@ -35,7 +36,7 @@ function errorHandler(err, req, res, _next) {
   }
 
   // Don't leak stack traces in production
-  if (process.env.NODE_ENV === 'development' && statusCode >= 500) {
+  if (config.nodeEnv === 'development' && statusCode >= 500) {
     response.error.stack = err.stack;
   }
 
