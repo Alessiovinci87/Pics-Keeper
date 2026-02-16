@@ -1,5 +1,6 @@
 const db = require('../../database/pool');
 const logger = require('../../utils/logger');
+const config = require('../../config');
 const { syncDateRange, toDateStr } = require('../../utils/helpers');
 const AdsApiClient = require('../../services/ads-api.client');
 const SyncLogger = require('../../services/sync-logger');
@@ -10,6 +11,93 @@ const SyncLogger = require('../../services/sync-logger');
  * Idempotent via ON CONFLICT.
  */
 const AdsService = {
+  /**
+   * Connect an Amazon Advertising account by storing the refresh token
+   * and fetching advertising profiles.
+   */
+  async connectAccount(accountId, refreshToken) {
+    const axios = require('axios');
+    const { retry } = require('../../utils/helpers');
+    const { ExternalApiError, NotFoundError, ValidationError } = require('../../utils/errors');
+
+    if (!accountId) throw new ValidationError('accountId is required');
+    if (!refreshToken) throw new ValidationError('refreshToken is required');
+
+    // Verify account exists
+    const accountResult = await db.query('SELECT * FROM accounts WHERE id = $1', [accountId]);
+    if (accountResult.rows.length === 0) throw new NotFoundError('Account');
+
+    // Step 1: Exchange refresh token for access token
+    let accessToken;
+    try {
+      const tokenResponse = await retry(
+        () =>
+          axios.post('https://api.amazon.com/auth/o2/token', {
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            client_id: config.adsApi.clientId,
+            client_secret: config.adsApi.clientSecret,
+          }),
+        { maxRetries: 3, baseDelay: 2000, label: 'Ads token exchange' }
+      );
+      accessToken = tokenResponse.data.access_token;
+    } catch (err) {
+      throw new ExternalApiError(
+        'Amazon Advertising',
+        'Failed to exchange refresh token: ' + (err.response?.data?.error_description || err.message)
+      );
+    }
+
+    // Step 2: Fetch advertising profiles
+    let profiles;
+    try {
+      const profilesResponse = await retry(
+        () =>
+          axios.get('https://advertising-api.amazon.com/v2/profiles', {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Amazon-Advertising-API-ClientId': config.adsApi.clientId,
+            },
+          }),
+        { maxRetries: 3, baseDelay: 2000, label: 'Ads fetch profiles' }
+      );
+      profiles = profilesResponse.data;
+    } catch (err) {
+      throw new ExternalApiError(
+        'Amazon Advertising',
+        'Failed to fetch advertising profiles: ' + (err.response?.data?.message || err.message)
+      );
+    }
+
+    // Step 3: Map profiles to storage format
+    const profileIds = profiles.map((p) => ({
+      profileId: String(p.profileId),
+      countryCode: p.countryCode,
+      currencyCode: p.currencyCode,
+      accountId: p.accountInfo?.id,
+      type: p.accountInfo?.type,
+    }));
+
+    // Step 4: Store refresh token and profiles on the account
+    const updateResult = await db.query(
+      `UPDATE accounts
+       SET ads_api_refresh_token = $1, ads_profile_ids = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [refreshToken, JSON.stringify(profileIds), accountId]
+    );
+
+    logger.info('Ads account connected', {
+      accountId,
+      profileCount: profileIds.length,
+    });
+
+    return {
+      account: updateResult.rows[0],
+      profiles: profileIds,
+    };
+  },
+
   /**
    * Sync ads data for a single account+marketplace.
    */
