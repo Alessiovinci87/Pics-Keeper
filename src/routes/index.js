@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const adsRoutes = require('../modules/ads/ads.routes');
 const accountRoutes = require('../modules/accounts/account.routes');
 const dashboardRoutes = require('./dashboard.routes');
 const orderRoutes = require('./order.routes');
@@ -14,7 +15,11 @@ router.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+
+
 // Module routes
+router.use('/ads', adsRoutes);
+
 router.use('/accounts', accountRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/order', orderRoutes);

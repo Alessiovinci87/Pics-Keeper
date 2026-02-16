@@ -28,21 +28,33 @@ class AdsApiClient {
       return this.accessToken;
     }
 
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: this.target.ads_api_refresh_token,
+      client_id: config.adsApi.clientId,
+      client_secret: config.adsApi.clientSecret,
+    });
+
     const response = await retry(
       () =>
-        axios.post('https://api.amazon.com/auth/o2/token', {
-          grant_type: 'refresh_token',
-          refresh_token: this.target.ads_api_refresh_token,
-          client_id: config.adsApi.clientId,
-          client_secret: config.adsApi.clientSecret,
-        }),
+        axios.post(
+          'https://api.amazon.com/auth/o2/token',
+          params.toString(),
+          {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+          }
+        ),
       { maxRetries: 3, baseDelay: 2000, label: 'Ads API token' }
     );
 
     this.accessToken = response.data.access_token;
     this.tokenExpiresAt = Date.now() + response.data.expires_in * 1000;
+
     return this.accessToken;
   }
+
 
   /**
    * Make an authenticated Ads API request.
