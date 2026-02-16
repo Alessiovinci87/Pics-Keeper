@@ -4,6 +4,8 @@ const { syncDateRange, toDateStr } = require('../../utils/helpers');
 const AdsApiClient = require('../../services/ads-api.client');
 const SyncLogger = require('../../services/sync-logger');
 
+const CAMPAIGN_TYPES = ['SP', 'SB', 'SD'];
+
 /**
  * Ads Sync Service - fetches daily spend from Amazon Advertising API.
  * Aggregates by ASIN per day per campaign type.
@@ -11,31 +13,57 @@ const SyncLogger = require('../../services/sync-logger');
  */
 const AdsService = {
   /**
+   * Check whether a target has the required credentials for ads sync.
+   * Returns null if ready, or a reason string if not.
+   */
+  checkTargetReadiness(target) {
+    if (!target.ads_api_refresh_token) {
+      return 'no ads_api_refresh_token on account';
+    }
+    const profileId = this.getProfileId(target, target.country_code);
+    if (!profileId) {
+      return `no ads profile ID for country ${target.country_code}`;
+    }
+    return null;
+  },
+
+  /**
    * Sync ads data for a single account+marketplace.
+   * Skips gracefully if the target lacks ads credentials or profile IDs.
    */
   async syncAds(target) {
+    // Pre-flight check: skip targets that aren't configured for ads
+    const skipReason = this.checkTargetReadiness(target);
+    if (skipReason) {
+      logger.debug('Skipping ads sync for target', {
+        accountId: target.account_id,
+        marketplace: target.country_code,
+        reason: skipReason,
+      });
+      return { processed: 0, inserted: 0, skipped: true, reason: skipReason };
+    }
+
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'ads');
     let processed = 0;
     let inserted = 0;
 
     try {
       const { from, to } = syncDateRange(target.last_ads_sync_at, 14);
+      const profileId = this.getProfileId(target, target.country_code);
 
       logger.info('Starting ads sync', {
         accountId: target.account_id,
         marketplace: target.country_code,
+        profileId,
         from: toDateStr(from),
         to: toDateStr(to),
       });
 
       const adsClient = new AdsApiClient(target);
 
-      // Fetch reports for each campaign type: SP, SB, SD
-      const campaignTypes = ['SP', 'SB', 'SD'];
-
-      for (const campaignType of campaignTypes) {
+      for (const campaignType of CAMPAIGN_TYPES) {
         const report = await adsClient.getAsinDailyReport({
-          profileId: this.getProfileId(target, target.country_code),
+          profileId,
           campaignType,
           startDate: toDateStr(from),
           endDate: toDateStr(to),

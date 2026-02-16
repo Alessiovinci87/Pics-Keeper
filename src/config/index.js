@@ -19,9 +19,10 @@ const config = {
     clientSecret: process.env.SP_API_APP_CLIENT_SECRET || '',
   },
 
-  adsApi: {
-    clientId: process.env.ADS_API_CLIENT_ID || '',
-    clientSecret: process.env.ADS_API_CLIENT_SECRET || '',
+  amazonAds: {
+    clientId: process.env.AMAZON_ADS_CLIENT_ID || '',
+    clientSecret: process.env.AMAZON_ADS_CLIENT_SECRET || '',
+    tokenEndpoint: 'https://api.amazon.com/auth/o2/token',
   },
 
   cron: {
@@ -33,6 +34,29 @@ const config = {
   },
 
   logLevel: process.env.LOG_LEVEL || 'info',
+};
+
+/**
+ * Validate that required configuration is present.
+ * Called at startup to fail fast rather than at first API call.
+ */
+config.validate = function () {
+  const errors = [];
+
+  if (!this.amazonAds.clientId) {
+    errors.push('AMAZON_ADS_CLIENT_ID is required');
+  }
+  if (!this.amazonAds.clientSecret) {
+    errors.push('AMAZON_ADS_CLIENT_SECRET is required');
+  }
+  if (!this.spApi.clientId) {
+    errors.push('SP_API_APP_CLIENT_ID is required');
+  }
+  if (!this.spApi.clientSecret) {
+    errors.push('SP_API_APP_CLIENT_SECRET is required');
+  }
+
+  return errors;
 };
 
 module.exports = config;

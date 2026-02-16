@@ -6,6 +6,14 @@ const { startScheduler, stopScheduler } = require('./jobs/scheduler');
 
 async function start() {
   try {
+    // Validate configuration before anything else
+    const configErrors = config.validate();
+    if (configErrors.length > 0) {
+      logger.warn('Missing configuration (API sync will be unavailable):', {
+        missing: configErrors,
+      });
+    }
+
     // Verify database connection
     const dbResult = await db.query('SELECT NOW() AS now');
     logger.info('Database connected', { serverTime: dbResult.rows[0].now });
