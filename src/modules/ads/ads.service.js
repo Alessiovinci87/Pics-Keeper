@@ -3,6 +3,9 @@ const logger = require('../../utils/logger');
 const { syncDateRange, toDateStr } = require('../../utils/helpers');
 const AdsApiClient = require('../../services/ads-api.client');
 const SyncLogger = require('../../services/sync-logger');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+dayjs.extend(utc);
 
 /**
  * Ads Sync Service - fetches daily spend from Amazon Advertising API.
@@ -21,27 +24,43 @@ const AdsService = {
     let inserted = 0;
 
     try {
-      const { from, to, isEmpty } = syncDateRange(target.last_ads_sync_at, 14);
-      const fromStr = toDateStr(from);
-      const toStr = toDateStr(to);
+      // Get raw sync range from shared helper
+      const { from, to } = syncDateRange(target.last_ads_sync_at, 14);
 
-      // If already synced up to yesterday, skip cleanly
-      if (isEmpty) {
-        logger.info('Ads sync skipped — already up to date', {
+      // Cap endDate at yesterday UTC — async reporting cannot produce intraday data
+      const yesterday = dayjs.utc().subtract(1, 'day').endOf('day');
+      const rawTo = dayjs.utc(to);
+      const cappedTo = rawTo.isBefore(yesterday) ? rawTo : yesterday;
+      const startDate = dayjs.utc(from).format('YYYY-MM-DD');
+      const endDate = cappedTo.format('YYYY-MM-DD');
+
+      logger.info('[Ads] Historical sync date range computed', {
+        accountId: target.account_id,
+        marketplace: target.country_code,
+        rawFrom: toDateStr(from),
+        rawTo: toDateStr(to),
+        cappedEndDate: endDate,
+        yesterday: yesterday.format('YYYY-MM-DD'),
+      });
+
+      // If startDate > endDate, already synced up to yesterday — skip cleanly
+      if (startDate > endDate) {
+        logger.info('[Ads] Sync skipped — already up to date', {
           accountId: target.account_id,
           marketplace: target.country_code,
           lastSync: target.last_ads_sync_at,
-          endDate: toStr,
+          startDate,
+          endDate,
         });
         await SyncLogger.complete(syncLog.id, { processed: 0, inserted: 0, updated: 0, skipped: true });
         return { processed: 0, inserted: 0, skipped: true };
       }
 
-      logger.info('Starting historical ads sync', {
+      logger.info('[Ads] Starting historical sync', {
         accountId: target.account_id,
         marketplace: target.country_code,
-        from: fromStr,
-        to: toStr,
+        startDate,
+        endDate,
       });
 
       const profileId = this.getProfileId(target, target.country_code);
@@ -60,8 +79,8 @@ const AdsService = {
       const report = await adsClient.getAsinDailyReport({
         profileId,
         campaignType: 'SP',
-        startDate: fromStr,
-        endDate: toStr,
+        startDate,
+        endDate,
       });
 
       for (const row of report) {
@@ -72,11 +91,11 @@ const AdsService = {
 
       await SyncLogger.complete(syncLog.id, { processed, inserted, updated: processed - inserted });
 
-      logger.info('Historical ads sync completed', {
+      logger.info('[Ads] Historical sync completed', {
         accountId: target.account_id,
         marketplace: target.country_code,
-        from: fromStr,
-        to: toStr,
+        startDate,
+        endDate,
         processed,
         inserted,
         updated: processed - inserted,
@@ -85,7 +104,7 @@ const AdsService = {
       return { processed, inserted };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
-      logger.error('Historical ads sync failed', {
+      logger.error('[Ads] Historical sync failed', {
         accountId: target.account_id,
         marketplace: target.country_code,
         error: err.message,

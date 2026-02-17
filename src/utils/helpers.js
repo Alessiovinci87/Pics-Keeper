@@ -42,28 +42,19 @@ function toDateStr(dateInput) {
 }
 
 /**
- * Build a date range for incremental sync: from lastSync to yesterday (UTC), capped at maxDays.
- * endDate is always yesterday to avoid requesting intraday data from async reporting.
+ * Build a date range for incremental sync: from lastSync to now, capped at maxDays.
  */
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
   const now = dayjs.utc();
-  const yesterday = now.subtract(1, 'day');
   let from;
   if (lastSyncAt) {
     from = dayjs.utc(lastSyncAt);
   } else {
     from = now.subtract(maxDaysBack, 'day');
   }
-
-  // If from is already at or past yesterday, sync window is empty
-  if (from.format('YYYY-MM-DD') >= yesterday.format('YYYY-MM-DD')) {
-    return { from: yesterday.toISOString(), to: yesterday.toISOString(), isEmpty: true };
-  }
-
   return {
     from: from.toISOString(),
-    to: yesterday.toISOString(),
-    isEmpty: false,
+    to: now.toISOString(),
   };
 }
 
