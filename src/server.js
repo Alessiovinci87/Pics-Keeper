@@ -1,3 +1,7 @@
+// Load environment variables first, before any other module imports.
+// This is the ONLY place dotenv should be called.
+require('dotenv').config();
+
 const config = require('./config');
 const logger = require('./utils/logger');
 const app = require('./app');
@@ -6,6 +10,18 @@ const { startScheduler, stopScheduler } = require('./jobs/scheduler');
 
 async function start() {
   try {
+    // Validate configuration at boot - fail fast if critical config is missing
+    const { warnings, errors } = config.validate();
+    for (const w of warnings) {
+      logger.warn(`Config warning: ${w}`);
+    }
+    if (errors.length > 0) {
+      for (const e of errors) {
+        logger.error(`Config error: ${e}`);
+      }
+      throw new Error(`Configuration invalid: ${errors.join('; ')}`);
+    }
+
     // Verify database connection
     const dbResult = await db.query('SELECT NOW() AS now');
     logger.info('Database connected', { serverTime: dbResult.rows[0].now });

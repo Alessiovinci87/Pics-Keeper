@@ -18,6 +18,7 @@ const runningJobs = new Set();
 
 /**
  * Guard against overlapping execution of the same job type.
+ * Catches all errors to ensure the job runner never crashes.
  */
 async function withLock(jobName, fn) {
   if (runningJobs.has(jobName)) {
@@ -46,6 +47,12 @@ async function withLock(jobName, fn) {
 async function syncOrdersJob() {
   await withLock('sync-orders', async () => {
     const targets = await AccountService.getActiveSyncTargets();
+
+    if (targets.length === 0) {
+      logger.info('sync-orders: no active targets, skipping');
+      return;
+    }
+
     for (const target of targets) {
       try {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
@@ -71,6 +78,12 @@ async function syncOrdersJob() {
 async function syncFinancialJob() {
   await withLock('sync-financial', async () => {
     const targets = await AccountService.getActiveSyncTargets();
+
+    if (targets.length === 0) {
+      logger.info('sync-financial: no active targets, skipping');
+      return;
+    }
+
     for (const target of targets) {
       try {
         await FinancialService.syncFinancialEvents(target);
@@ -89,11 +102,29 @@ async function syncFinancialJob() {
 }
 
 /**
- * Sync ads spend for all active account+marketplace combos.
+ * Sync ads spend for all ads-eligible account+marketplace combos.
+ * Uses getAdsSyncTargets() which filters for:
+ *   - ads_api_refresh_token present
+ *   - ads_profile_ids non-empty
+ * Each target is wrapped in try/catch so one failure doesn't kill the job runner.
  */
 async function syncAdsJob() {
   await withLock('sync-ads', async () => {
-    const targets = await AccountService.getActiveSyncTargets();
+    let targets;
+    try {
+      targets = await AccountService.getAdsSyncTargets();
+    } catch (err) {
+      logger.error('Failed to fetch ads sync targets', { error: err.message });
+      return;
+    }
+
+    if (targets.length === 0) {
+      logger.info('sync-ads: no eligible ads targets, skipping');
+      return;
+    }
+
+    logger.info('sync-ads: processing targets', { count: targets.length });
+
     for (const target of targets) {
       try {
         await AdsService.syncAds(target);
@@ -106,6 +137,7 @@ async function syncAdsJob() {
           marketplace: target.country_code,
           error: err.message,
         });
+        // Continue to next target - never crash the job runner
       }
     }
   });
@@ -118,6 +150,12 @@ async function syncAdsJob() {
 async function computeAndAggregateJob() {
   await withLock('compute-aggregate', async () => {
     const targets = await AccountService.getActiveSyncTargets();
+
+    if (targets.length === 0) {
+      logger.info('compute-aggregate: no active targets, skipping');
+      return;
+    }
+
     const dateFrom = dayjs.utc().subtract(7, 'day').format('YYYY-MM-DD');
     const dateTo = dayjs.utc().add(1, 'day').format('YYYY-MM-DD');
 
@@ -152,6 +190,12 @@ async function computeAndAggregateJob() {
 async function alertsJob() {
   await withLock('alerts', async () => {
     const targets = await AccountService.getActiveSyncTargets();
+
+    if (targets.length === 0) {
+      logger.info('alerts: no active targets, skipping');
+      return;
+    }
+
     const seenAccounts = new Set();
 
     for (const target of targets) {

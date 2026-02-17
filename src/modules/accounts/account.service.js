@@ -144,6 +144,43 @@ const AccountService = {
   },
 
   /**
+   * Get account+marketplace targets eligible for Ads sync.
+   * Filters for:
+   *   - account is active
+   *   - account_marketplace is active
+   *   - ads_api_refresh_token is present
+   *   - ads_profile_ids is a non-empty JSON array
+   */
+  async getAdsSyncTargets() {
+    const result = await db.query(`
+      SELECT
+        a.id AS account_id,
+        a.seller_id,
+        a.sp_api_refresh_token,
+        a.ads_api_refresh_token,
+        a.ads_profile_ids,
+        am.marketplace_id AS account_marketplace_id,
+        m.marketplace_id AS amazon_marketplace_id,
+        m.country_code,
+        m.region,
+        m.currency,
+        am.last_orders_sync_at,
+        am.last_financial_sync_at,
+        am.last_ads_sync_at
+      FROM accounts a
+      JOIN account_marketplaces am ON am.account_id = a.id AND am.is_active = TRUE
+      JOIN marketplaces m ON m.id = am.marketplace_id
+      WHERE a.is_active = TRUE
+        AND a.ads_api_refresh_token IS NOT NULL
+        AND a.ads_api_refresh_token != ''
+        AND a.ads_profile_ids IS NOT NULL
+        AND jsonb_array_length(a.ads_profile_ids) > 0
+      ORDER BY a.id, m.id
+    `);
+    return result.rows;
+  },
+
+  /**
    * Update last sync timestamp for a specific sync type.
    */
   async updateSyncTimestamp(accountId, marketplaceId, syncType, timestamp) {
