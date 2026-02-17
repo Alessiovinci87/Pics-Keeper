@@ -3,6 +3,11 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const { retry, sleep } = require('../utils/helpers');
 
+// ============================================================
+// TEMPORARY DEBUG MODE — remove after root cause identified
+// ============================================================
+const ADS_DEBUG = true;
+
 /**
  * Amazon Advertising API Client.
  * Handles report creation, polling, and download for ASIN-level daily spend data.
@@ -18,6 +23,20 @@ class AdsApiClient {
     if (target.region === 'NA') {
       this.baseUrl = 'https://advertising-api.amazon.com';
     }
+
+    if (ADS_DEBUG) {
+      logger.info('[Ads][DEBUG] Client initialized', {
+        accountId: target.account_id,
+        region: target.region,
+        baseUrl: this.baseUrl,
+        hasRefreshToken: !!target.ads_api_refresh_token,
+        refreshTokenLength: target.ads_api_refresh_token?.length || 0,
+        configClientId: config.adsApi.clientId || 'UNDEFINED',
+        configClientIdLength: config.adsApi.clientId?.length || 0,
+        configHasSecret: !!config.adsApi.clientSecret,
+        configSecretLength: config.adsApi.clientSecret?.length || 0,
+      });
+    }
   }
 
   /**
@@ -28,29 +47,56 @@ class AdsApiClient {
       return this.accessToken;
     }
 
-    const response = await retry(
-      async () => {
-        try {
-          // LWA token endpoint requires application/x-www-form-urlencoded
-          const params = new URLSearchParams();
-          params.append('grant_type', 'refresh_token');
-          params.append('refresh_token', this.target.ads_api_refresh_token);
-          params.append('client_id', config.adsApi.clientId);
-          params.append('client_secret', config.adsApi.clientSecret);
-          return await axios.post('https://api.amazon.com/auth/o2/token', params);
-        } catch (err) {
-          logger.error('[Ads] LWA token exchange failed', {
-            status: err.response?.status,
-            data: err.response?.data,
-            headers: err.response?.headers,
-            url: err.config?.url,
-            accountId: this.target.account_id,
-          });
-          throw err;
-        }
-      },
-      { maxRetries: 3, baseDelay: 2000, label: 'Ads API token' }
-    );
+    // LWA token endpoint requires application/x-www-form-urlencoded
+    const params = new URLSearchParams();
+    params.append('grant_type', 'refresh_token');
+    params.append('refresh_token', this.target.ads_api_refresh_token);
+    params.append('client_id', config.adsApi.clientId);
+    params.append('client_secret', config.adsApi.clientSecret);
+
+    if (ADS_DEBUG) {
+      logger.info('[Ads][DEBUG] LWA token request', {
+        url: 'https://api.amazon.com/auth/o2/token',
+        method: 'POST',
+        contentType: 'application/x-www-form-urlencoded',
+        grantType: 'refresh_token',
+        clientId: config.adsApi.clientId || 'UNDEFINED',
+        clientIdType: typeof config.adsApi.clientId,
+        hasClientSecret: !!config.adsApi.clientSecret,
+        hasRefreshToken: !!this.target.ads_api_refresh_token,
+        serializedBody: params.toString().replace(/client_secret=[^&]+/, 'client_secret=***').replace(/refresh_token=[^&]+/, 'refresh_token=***'),
+      });
+    }
+
+    // NO RETRY — single attempt for clear diagnostics
+    let response;
+    try {
+      response = await axios.post('https://api.amazon.com/auth/o2/token', params);
+    } catch (err) {
+      logger.error('[Ads][DEBUG] LWA FULL ERROR DUMP', {
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+        request: {
+          url: err.config?.url,
+          method: err.config?.method,
+          headers: err.config?.headers,
+          data: err.config?.data?.replace?.(/client_secret=[^&]+/, 'client_secret=***')?.replace?.(/refresh_token=[^&]+/, 'refresh_token=***') || err.config?.data,
+        },
+        message: err.message,
+        code: err.code,
+        stack: err.stack,
+      });
+      throw err;
+    }
+
+    if (ADS_DEBUG) {
+      logger.info('[Ads][DEBUG] LWA token SUCCESS', {
+        hasAccessToken: !!response.data.access_token,
+        tokenType: response.data.token_type,
+        expiresIn: response.data.expires_in,
+      });
+    }
 
     this.accessToken = response.data.access_token;
     this.tokenExpiresAt = Date.now() + response.data.expires_in * 1000;
@@ -62,6 +108,7 @@ class AdsApiClient {
    */
   async request(method, path, data = {}, profileId = null) {
     const token = await this.getAccessToken();
+    const url = `${this.baseUrl}${path}`;
     const headers = {
       Authorization: `Bearer ${token}`,
       'Amazon-Advertising-API-ClientId': config.adsApi.clientId,
@@ -71,17 +118,62 @@ class AdsApiClient {
       headers['Amazon-Advertising-API-Scope'] = profileId;
     }
 
-    const response = await retry(
-      () =>
-        axios({
-          method,
-          url: `${this.baseUrl}${path}`,
-          headers,
-          data: method !== 'GET' ? data : undefined,
-          params: method === 'GET' ? data : undefined,
-        }),
-      { maxRetries: 3, baseDelay: 2000, label: `Ads API ${method} ${path}` }
-    );
+    if (ADS_DEBUG) {
+      logger.info('[Ads][DEBUG] API request outgoing', {
+        method,
+        url,
+        path,
+        profileId: profileId || 'NONE',
+        baseUrl: this.baseUrl,
+        region: this.target.region,
+        clientIdHeader: config.adsApi.clientId || 'UNDEFINED',
+        scopeHeader: profileId || 'NONE',
+        hasAuthToken: !!token,
+        authTokenPrefix: token ? token.substring(0, 10) + '...' : 'NONE',
+        payload: method !== 'GET' ? JSON.stringify(data) : undefined,
+        queryParams: method === 'GET' ? JSON.stringify(data) : undefined,
+      });
+    }
+
+    // NO RETRY — single attempt for clear diagnostics
+    let response;
+    try {
+      response = await axios({
+        method,
+        url,
+        headers,
+        data: method !== 'GET' ? data : undefined,
+        params: method === 'GET' ? data : undefined,
+      });
+    } catch (err) {
+      logger.error('[Ads][DEBUG] API FULL ERROR DUMP', {
+        status: err.response?.status,
+        data: err.response?.data,
+        headers: err.response?.headers,
+        request: {
+          url: err.config?.url,
+          method: err.config?.method,
+          data: err.config?.data,
+          headers: {
+            ...err.config?.headers,
+            Authorization: err.config?.headers?.Authorization ? 'Bearer ***' : 'MISSING',
+          },
+        },
+        message: err.message,
+        code: err.code,
+        stack: err.stack,
+      });
+      throw err;
+    }
+
+    if (ADS_DEBUG) {
+      logger.info('[Ads][DEBUG] API response OK', {
+        method,
+        path,
+        statusCode: response.status,
+        responseKeys: Object.keys(response.data || {}),
+      });
+    }
 
     return response.data;
   }
@@ -107,28 +199,41 @@ class AdsApiClient {
       SD: 'sdAdvertisedProduct',
     };
 
+    const reportPayload = {
+      reportDate: startDate,
+      configuration: {
+        adProduct: campaignType,
+        groupBy: ['asin'],
+        columns: ['asin', 'date', 'impressions', 'clicks', 'cost', 'sales', 'purchases'],
+        reportTypeId: reportTypeMap[campaignType],
+        timeUnit: 'DAILY',
+        format: 'GZIP_JSON',
+      },
+      startDate,
+      endDate,
+    };
+
+    if (ADS_DEBUG) {
+      logger.info('[Ads][DEBUG] Report creation payload', {
+        profileId,
+        campaignType,
+        reportTypeId: reportTypeMap[campaignType],
+        startDate,
+        endDate,
+        fullPayload: JSON.stringify(reportPayload),
+      });
+    }
+
     // Step 1: Create report
     const createResponse = await this.request(
       'POST',
       '/reporting/reports',
-      {
-        reportDate: startDate,
-        configuration: {
-          adProduct: campaignType,
-          groupBy: ['asin'],
-          columns: ['asin', 'date', 'impressions', 'clicks', 'cost', 'sales', 'purchases'],
-          reportTypeId: reportTypeMap[campaignType],
-          timeUnit: 'DAILY',
-          format: 'GZIP_JSON',
-        },
-        startDate,
-        endDate,
-      },
+      reportPayload,
       profileId
     );
 
     const reportId = createResponse.reportId;
-    logger.info('Ads report created', { reportId, campaignType, startDate, endDate });
+    logger.info('[Ads] Report created', { reportId, campaignType, startDate, endDate });
 
     // Step 2: Poll for completion (max 60 attempts, 5s each = 5 min max)
     // Handle both PENDING and PROCESSING states from Amazon
@@ -140,7 +245,7 @@ class AdsApiClient {
       const statusResponse = await this.request('GET', `/reporting/reports/${reportId}`, {}, profileId);
       status = statusResponse.status;
 
-      logger.debug('Ads report poll', {
+      logger.debug('[Ads] Report poll', {
         reportId,
         campaignType,
         attempt,
@@ -153,7 +258,7 @@ class AdsApiClient {
       }
 
       if (status === 'FAILURE') {
-        logger.error('Ads report failed on Amazon side', { reportId, campaignType, response: statusResponse });
+        logger.error('[Ads] Report failed on Amazon side', { reportId, campaignType, response: statusResponse });
         return [];
       }
 
@@ -161,7 +266,7 @@ class AdsApiClient {
     }
 
     if (!downloadUrl) {
-      logger.warn('Ads report not completed in time', {
+      logger.warn('[Ads] Report not completed in time', {
         reportId,
         campaignType,
         lastStatus: status,
@@ -170,7 +275,7 @@ class AdsApiClient {
       return [];
     }
 
-    logger.info('Ads report completed, downloading', { reportId, campaignType });
+    logger.info('[Ads] Report completed, downloading', { reportId, campaignType });
 
     // Step 3: Download and parse
     const reportData = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
@@ -178,7 +283,7 @@ class AdsApiClient {
     const decompressed = zlib.gunzipSync(reportData.data);
     const rows = JSON.parse(decompressed.toString());
 
-    logger.info('Ads report downloaded', { reportId, campaignType, rowCount: rows.length });
+    logger.info('[Ads] Report downloaded', { reportId, campaignType, rowCount: rows.length });
 
     return rows;
   }
