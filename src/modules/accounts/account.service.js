@@ -92,7 +92,7 @@ const AccountService = {
     const values = [];
     let idx = 1;
 
-    const allowedFields = ['name', 'sp_api_refresh_token', 'ads_api_refresh_token', 'ads_profile_ids', 'is_active'];
+    const allowedFields = ['name', 'seller_id', 'sp_api_refresh_token', 'ads_api_refresh_token', 'ads_profile_ids', 'is_active'];
     for (const [key, value] of Object.entries(updates)) {
       const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase(); // camelCase -> snake_case
       if (allowedFields.includes(dbKey)) {
