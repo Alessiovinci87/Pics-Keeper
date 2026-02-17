@@ -12,6 +12,55 @@ const SyncLogger = require('../../services/sync-logger');
  */
 const FinancialService = {
   /**
+   * Cache of SellerSKU -> ASIN mappings per account.
+   * Amazon Financial Events API only provides SellerSKU, not ASIN.
+   * We resolve it from orders_raw and asins tables.
+   */
+  _skuToAsinCache: {},
+
+  async resolveSkuToAsin(accountId, sellerSKU) {
+    if (!sellerSKU) return null;
+
+    const cacheKey = `${accountId}:${sellerSKU}`;
+    if (this._skuToAsinCache[cacheKey]) {
+      return this._skuToAsinCache[cacheKey];
+    }
+
+    // Try orders_raw first (most reliable: has direct ASIN-SKU pairs from order items)
+    const orderLookup = await db.query(
+      `SELECT DISTINCT asin FROM orders_raw
+       WHERE account_id = $1 AND sku = $2
+       LIMIT 1`,
+      [accountId, sellerSKU]
+    );
+
+    if (orderLookup.rows.length > 0) {
+      this._skuToAsinCache[cacheKey] = orderLookup.rows[0].asin;
+      return orderLookup.rows[0].asin;
+    }
+
+    // Fallback: check asins table
+    const asinLookup = await db.query(
+      `SELECT asin FROM asins
+       WHERE account_id = $1 AND sku = $2
+       LIMIT 1`,
+      [accountId, sellerSKU]
+    );
+
+    if (asinLookup.rows.length > 0) {
+      this._skuToAsinCache[cacheKey] = asinLookup.rows[0].asin;
+      return asinLookup.rows[0].asin;
+    }
+
+    // If no mapping found, use SKU as fallback (some sellers use ASIN as SKU)
+    logger.warn('Could not resolve SellerSKU to ASIN, using SKU as fallback', {
+      accountId,
+      sellerSKU,
+    });
+    return sellerSKU;
+  },
+
+  /**
    * Sync financial events for a single account+marketplace.
    */
   async syncFinancialEvents(target) {
@@ -44,7 +93,7 @@ const FinancialService = {
         // Process ShipmentEventList (order-level fees)
         for (const event of eventList.ShipmentEventList || []) {
           for (const itemCharges of event.ShipmentItemList || []) {
-            const rows = this.extractShipmentFees(target, event, itemCharges);
+            const rows = await this.extractShipmentFees(target, event, itemCharges);
             for (const row of rows) {
               processed++;
               const res = await this.upsertEvent(row);
@@ -56,7 +105,7 @@ const FinancialService = {
         // Process RefundEventList
         for (const event of eventList.RefundEventList || []) {
           for (const itemCharges of event.ShipmentItemList || []) {
-            const rows = this.extractRefundFees(target, event, itemCharges);
+            const rows = await this.extractRefundFees(target, event, itemCharges);
             for (const row of rows) {
               processed++;
               const res = await this.upsertEvent(row);
@@ -99,12 +148,12 @@ const FinancialService = {
 
   /**
    * Extract fee rows from a shipment event item.
-   * Maps Amazon fee types to our normalized structure.
+   * Resolves SellerSKU -> ASIN via DB lookup.
    */
-  extractShipmentFees(target, event, itemCharges) {
+  async extractShipmentFees(target, event, itemCharges) {
     const rows = [];
     const orderId = event.AmazonOrderId;
-    const asin = itemCharges.SellerSKU; // Will be resolved to ASIN if needed
+    const asin = await this.resolveSkuToAsin(target.account_id, itemCharges.SellerSKU);
     const postedDate = event.PostedDate;
 
     // ItemChargeList: revenue components
@@ -113,7 +162,7 @@ const FinancialService = {
         account_id: target.account_id,
         marketplace_id: target.account_marketplace_id,
         amazon_order_id: orderId,
-        asin: itemCharges.SellerSKU,
+        asin,
         event_type: 'ShipmentEvent',
         fee_type: charge.ChargeType,
         amount: parseFloat(charge.ChargeAmount?.CurrencyAmount || 0),
@@ -130,7 +179,7 @@ const FinancialService = {
         account_id: target.account_id,
         marketplace_id: target.account_marketplace_id,
         amazon_order_id: orderId,
-        asin: itemCharges.SellerSKU,
+        asin,
         event_type: 'ShipmentEvent',
         fee_type: fee.FeeType,
         amount: parseFloat(fee.FeeAmount?.CurrencyAmount || 0),
@@ -146,10 +195,12 @@ const FinancialService = {
 
   /**
    * Extract refund event fees. Amounts are typically negative.
+   * Resolves SellerSKU -> ASIN via DB lookup.
    */
-  extractRefundFees(target, event, itemCharges) {
+  async extractRefundFees(target, event, itemCharges) {
     const rows = [];
     const orderId = event.AmazonOrderId;
+    const asin = await this.resolveSkuToAsin(target.account_id, itemCharges.SellerSKU);
     const postedDate = event.PostedDate;
 
     for (const charge of itemCharges.ItemChargeList || []) {
@@ -157,7 +208,7 @@ const FinancialService = {
         account_id: target.account_id,
         marketplace_id: target.account_marketplace_id,
         amazon_order_id: orderId,
-        asin: itemCharges.SellerSKU,
+        asin,
         event_type: 'RefundEvent',
         fee_type: charge.ChargeType,
         amount: parseFloat(charge.ChargeAmount?.CurrencyAmount || 0),
@@ -173,7 +224,7 @@ const FinancialService = {
         account_id: target.account_id,
         marketplace_id: target.account_marketplace_id,
         amazon_order_id: orderId,
-        asin: itemCharges.SellerSKU,
+        asin,
         event_type: 'RefundEvent',
         fee_type: fee.FeeType,
         amount: parseFloat(fee.FeeAmount?.CurrencyAmount || 0),
@@ -223,6 +274,7 @@ const FinancialService = {
       ON CONFLICT (account_id, amazon_order_id, event_type, fee_type, event_date)
       DO UPDATE SET
         amount = EXCLUDED.amount,
+        asin = COALESCE(EXCLUDED.asin, financial_events_raw.asin),
         raw_data = EXCLUDED.raw_data,
         synced_at = NOW()
       RETURNING (xmax = 0) AS is_insert`,

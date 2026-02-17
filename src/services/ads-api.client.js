@@ -86,29 +86,46 @@ class AdsApiClient {
       return [];
     }
 
-    // Map campaign type to report type
-    const reportTypeMap = {
-      SP: 'spAdvertisedProduct',
-      SB: 'sbPurchasedProduct',
-      SD: 'sdAdvertisedProduct',
+    // Map short campaign type to full API name and report type
+    const campaignConfig = {
+      SP: {
+        adProduct: 'SPONSORED_PRODUCTS',
+        reportTypeId: 'spAdvertisedProduct',
+        columns: ['advertiserName', 'campaignId', 'adGroupId', 'asin', 'date', 'impressions', 'clicks', 'spend', 'sales14d', 'purchases14d'],
+      },
+      SB: {
+        adProduct: 'SPONSORED_BRANDS',
+        reportTypeId: 'sbPurchasedProduct',
+        columns: ['advertiserName', 'campaignId', 'adGroupId', 'asin', 'date', 'impressions', 'clicks', 'spend', 'sales14d', 'purchases14d'],
+      },
+      SD: {
+        adProduct: 'SPONSORED_DISPLAY',
+        reportTypeId: 'sdAdvertisedProduct',
+        columns: ['advertiserName', 'campaignId', 'adGroupId', 'asin', 'date', 'impressions', 'clicks', 'spend', 'sales14d', 'purchases14d'],
+      },
     };
 
-    // Step 1: Create report
+    const cfg = campaignConfig[campaignType];
+    if (!cfg) {
+      logger.error('Unknown campaign type', { campaignType });
+      return [];
+    }
+
+    // Step 1: Create report (v3 Reporting API)
     const createResponse = await this.request(
       'POST',
       '/reporting/reports',
       {
-        reportDate: startDate,
+        startDate,
+        endDate,
         configuration: {
-          adProduct: campaignType,
+          adProduct: cfg.adProduct,
           groupBy: ['asin'],
-          columns: ['asin', 'date', 'impressions', 'clicks', 'cost', 'sales', 'purchases'],
-          reportTypeId: reportTypeMap[campaignType],
+          columns: cfg.columns,
+          reportTypeId: cfg.reportTypeId,
           timeUnit: 'DAILY',
           format: 'GZIP_JSON',
         },
-        startDate,
-        endDate,
       },
       profileId
     );
