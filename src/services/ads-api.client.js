@@ -31,12 +31,13 @@ class AdsApiClient {
     const response = await retry(
       async () => {
         try {
-          return await axios.post('https://api.amazon.com/auth/o2/token', {
-            grant_type: 'refresh_token',
-            refresh_token: this.target.ads_api_refresh_token,
-            client_id: config.adsApi.clientId,
-            client_secret: config.adsApi.clientSecret,
-          });
+          // LWA token endpoint requires application/x-www-form-urlencoded
+          const params = new URLSearchParams();
+          params.append('grant_type', 'refresh_token');
+          params.append('refresh_token', this.target.ads_api_refresh_token);
+          params.append('client_id', config.adsApi.clientId);
+          params.append('client_secret', config.adsApi.clientSecret);
+          return await axios.post('https://api.amazon.com/auth/o2/token', params);
         } catch (err) {
           logger.error('[Ads] LWA token exchange failed', {
             status: err.response?.status,
