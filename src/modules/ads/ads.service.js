@@ -27,8 +27,9 @@ const AdsService = {
 
     try {
       // Determine startDate from MAX(spend_date) in DB — the true source of truth
+      // Use TO_CHAR to avoid timezone shift (PG DATE → JS Date drops a day in CET)
       const lastSpendResult = await db.query(
-        `SELECT MAX(spend_date) AS last_spend_date
+        `SELECT TO_CHAR(MAX(spend_date), 'YYYY-MM-DD') AS last_spend_date
          FROM ads_daily_spend
          WHERE account_id = $1 AND marketplace_id = $2`,
         [target.account_id, target.account_marketplace_id]

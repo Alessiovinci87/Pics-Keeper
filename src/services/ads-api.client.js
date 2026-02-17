@@ -35,6 +35,16 @@ class AdsApiClient {
           refresh_token: this.target.ads_api_refresh_token,
           client_id: config.adsApi.clientId,
           client_secret: config.adsApi.clientSecret,
+        }).catch((err) => {
+          // Surface Amazon's error response for diagnostics (invalid_grant, invalid_client, etc.)
+          if (err.response) {
+            logger.error('[Ads] LWA token exchange failed', {
+              status: err.response.status,
+              data: err.response.data,
+              accountId: this.target.account_id,
+            });
+          }
+          throw err;
         }),
       { maxRetries: 3, baseDelay: 2000, label: 'Ads API token' }
     );
