@@ -1,8 +1,15 @@
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+dayjs.extend(utc);
+
 const db = require('../../database/pool');
 const logger = require('../../utils/logger');
 const { syncDateRange, toDateStr } = require('../../utils/helpers');
 const AdsApiClient = require('../../services/ads-api.client');
 const SyncLogger = require('../../services/sync-logger');
+
+// Only SP is stable for now; SB and SD are temporarily disabled
+const ENABLED_CAMPAIGN_TYPES = ['SP'];
 
 /**
  * Ads Sync Service - fetches daily spend from Amazon Advertising API.
@@ -17,50 +24,83 @@ const AdsService = {
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'ads');
     let processed = 0;
     let inserted = 0;
+    let updated = 0;
 
     try {
       const { from, to } = syncDateRange(target.last_ads_sync_at, 14);
 
-      logger.info('Starting ads sync', {
+      // Cap endDate to yesterday — Amazon does not consolidate the current day
+      const yesterday = dayjs.utc().subtract(1, 'day').format('YYYY-MM-DD');
+      const startDate = toDateStr(from);
+      let endDate = toDateStr(to);
+      if (endDate > yesterday) {
+        endDate = yesterday;
+      }
+
+      // Skip if date range is invalid (e.g., last sync was today)
+      if (startDate > endDate) {
+        logger.info('[Ads] No valid date range to sync (startDate > endDate)', {
+          accountId: target.account_id,
+          marketplace: target.country_code,
+          startDate,
+          endDate,
+        });
+        await SyncLogger.complete(syncLog.id, { processed: 0, inserted: 0, updated: 0 });
+        return { processed: 0, inserted: 0, updated: 0 };
+      }
+
+      logger.info('[Ads] Starting sync', {
         accountId: target.account_id,
         marketplace: target.country_code,
-        from: toDateStr(from),
-        to: toDateStr(to),
+        startDate,
+        endDate,
+        campaignTypes: ENABLED_CAMPAIGN_TYPES,
       });
 
       const adsClient = new AdsApiClient(target);
 
-      // Fetch reports for each campaign type: SP, SB, SD
-      const campaignTypes = ['SP', 'SB', 'SD'];
+      for (const campaignType of ENABLED_CAMPAIGN_TYPES) {
+        logger.info('[Ads] Fetching report', {
+          accountId: target.account_id,
+          marketplace: target.country_code,
+          campaignType,
+        });
 
-      for (const campaignType of campaignTypes) {
         const report = await adsClient.getAsinDailyReport({
           profileId: this.getProfileId(target, target.country_code),
           campaignType,
-          startDate: toDateStr(from),
-          endDate: toDateStr(to),
+          startDate,
+          endDate,
+        });
+
+        logger.info('[Ads] Report rows received', {
+          accountId: target.account_id,
+          campaignType,
+          rowCount: report.length,
         });
 
         for (const row of report) {
           processed++;
           const result = await this.upsertAdsDailySpend(target, row, campaignType);
           if (result === 'inserted') inserted++;
+          else updated++;
         }
       }
 
-      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0 });
+      await SyncLogger.complete(syncLog.id, { processed, inserted, updated });
 
-      logger.info('Ads sync completed', {
+      logger.info('[Ads] Sync completed', {
         accountId: target.account_id,
         marketplace: target.country_code,
         processed,
         inserted,
+        updated,
       });
 
-      return { processed, inserted };
+      return { processed, inserted, updated };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
-      logger.error('Ads sync failed', {
+      logger.error('[Ads] Sync failed', {
         accountId: target.account_id,
         marketplace: target.country_code,
         error: err.message,
