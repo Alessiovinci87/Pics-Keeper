@@ -76,6 +76,7 @@ class AdsApiClient {
   /**
    * Get ASIN-level daily report via v3 reporting API.
    * Creates a report, polls for completion, then downloads.
+   * endDate must be <= yesterday — never request today's data via async reporting.
    */
   async getAsinDailyReport({ profileId, campaignType, startDate, endDate }) {
     if (!profileId) {
@@ -114,25 +115,49 @@ class AdsApiClient {
     );
 
     const reportId = createResponse.reportId;
-    logger.debug('Ads report created', { reportId, campaignType });
+    logger.info('Ads report created', { reportId, campaignType, startDate, endDate });
 
     // Step 2: Poll for completion (max 60 attempts, 5s each = 5 min max)
-    let status = 'PROCESSING';
+    // Handle both PENDING and PROCESSING states from Amazon
+    let status = 'PENDING';
     let downloadUrl = null;
 
-    for (let i = 0; i < 60 && status === 'PROCESSING'; i++) {
+    for (let attempt = 1; attempt <= 60; attempt++) {
       await sleep(5000);
       const statusResponse = await this.request('GET', `/reporting/reports/${reportId}`, {}, profileId);
       status = statusResponse.status;
+
+      logger.debug('Ads report poll', {
+        reportId,
+        campaignType,
+        attempt,
+        status,
+      });
+
       if (status === 'COMPLETED') {
         downloadUrl = statusResponse.url;
+        break;
       }
+
+      if (status === 'FAILURE') {
+        logger.error('Ads report failed on Amazon side', { reportId, campaignType, response: statusResponse });
+        return [];
+      }
+
+      // Continue polling for PENDING or PROCESSING
     }
 
     if (!downloadUrl) {
-      logger.warn('Ads report not completed in time', { reportId, campaignType });
+      logger.warn('Ads report not completed in time', {
+        reportId,
+        campaignType,
+        lastStatus: status,
+        attempts: 60,
+      });
       return [];
     }
+
+    logger.info('Ads report completed, downloading', { reportId, campaignType });
 
     // Step 3: Download and parse
     const reportData = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
@@ -140,7 +165,87 @@ class AdsApiClient {
     const decompressed = zlib.gunzipSync(reportData.data);
     const rows = JSON.parse(decompressed.toString());
 
+    logger.info('Ads report downloaded', { reportId, campaignType, rowCount: rows.length });
+
     return rows;
+  }
+
+  /**
+   * Fetch live intraday stats for Sponsored Products campaigns.
+   * Uses the SP campaigns endpoint for synchronous (non-async) data.
+   * No report creation, no polling — direct API response.
+   */
+  async getLiveStats({ profileId, date }) {
+    if (!profileId) {
+      return { spend: 0, clicks: 0, sales: 0, impressions: 0 };
+    }
+
+    try {
+      // Use SP campaigns list endpoint to get today's aggregated stats
+      const campaigns = await this.request(
+        'POST',
+        '/sp/campaigns/list',
+        {
+          stateFilter: { include: ['ENABLED'] },
+        },
+        profileId
+      );
+
+      const campaignList = campaigns.campaigns || campaigns || [];
+
+      if (!Array.isArray(campaignList) || campaignList.length === 0) {
+        logger.info('No active SP campaigns found for live stats', { profileId });
+        return { spend: 0, clicks: 0, sales: 0, impressions: 0 };
+      }
+
+      // Fetch today's stats using the campaigns report endpoint (synchronous snapshot)
+      const campaignIds = campaignList
+        .map((c) => c.campaignId)
+        .filter(Boolean);
+
+      const statsResponse = await this.request(
+        'POST',
+        '/sp/campaigns/report',
+        {
+          campaigns: campaignIds.slice(0, 100), // Limit to avoid payload issues
+          startDate: date,
+          endDate: date,
+          metrics: ['impressions', 'clicks', 'cost', 'sales'],
+        },
+        profileId
+      );
+
+      // Aggregate all campaign stats
+      let totalSpend = 0;
+      let totalClicks = 0;
+      let totalSales = 0;
+      let totalImpressions = 0;
+
+      const rows = statsResponse.campaigns || statsResponse || [];
+      if (Array.isArray(rows)) {
+        for (const row of rows) {
+          totalSpend += parseFloat(row.cost || row.spend || 0);
+          totalClicks += parseInt(row.clicks || 0, 10);
+          totalSales += parseFloat(row.sales || 0);
+          totalImpressions += parseInt(row.impressions || 0, 10);
+        }
+      }
+
+      return {
+        spend: Math.round(totalSpend * 10000) / 10000,
+        clicks: totalClicks,
+        sales: Math.round(totalSales * 10000) / 10000,
+        impressions: totalImpressions,
+        campaignCount: campaignIds.length,
+      };
+    } catch (err) {
+      logger.error('Live stats fetch failed', {
+        profileId,
+        date,
+        error: err.message,
+      });
+      throw err;
+    }
   }
 }
 

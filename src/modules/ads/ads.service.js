@@ -6,12 +6,14 @@ const SyncLogger = require('../../services/sync-logger');
 
 /**
  * Ads Sync Service - fetches daily spend from Amazon Advertising API.
- * Aggregates by ASIN per day per campaign type.
+ * Historical sync only (endDate = yesterday UTC, never today).
+ * Sponsored Products (SP) only.
  * Idempotent via ON CONFLICT.
  */
 const AdsService = {
   /**
-   * Sync ads data for a single account+marketplace.
+   * Sync historical ads data for a single account+marketplace.
+   * Only Sponsored Products. endDate is always yesterday (UTC).
    */
   async syncAds(target) {
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'ads');
@@ -19,54 +21,119 @@ const AdsService = {
     let inserted = 0;
 
     try {
-      const { from, to } = syncDateRange(target.last_ads_sync_at, 14);
+      const { from, to, isEmpty } = syncDateRange(target.last_ads_sync_at, 14);
+      const fromStr = toDateStr(from);
+      const toStr = toDateStr(to);
 
-      logger.info('Starting ads sync', {
+      // If already synced up to yesterday, skip cleanly
+      if (isEmpty) {
+        logger.info('Ads sync skipped — already up to date', {
+          accountId: target.account_id,
+          marketplace: target.country_code,
+          lastSync: target.last_ads_sync_at,
+          endDate: toStr,
+        });
+        await SyncLogger.complete(syncLog.id, { processed: 0, inserted: 0, updated: 0, skipped: true });
+        return { processed: 0, inserted: 0, skipped: true };
+      }
+
+      logger.info('Starting historical ads sync', {
         accountId: target.account_id,
         marketplace: target.country_code,
-        from: toDateStr(from),
-        to: toDateStr(to),
+        from: fromStr,
+        to: toStr,
       });
+
+      const profileId = this.getProfileId(target, target.country_code);
+      if (!profileId) {
+        logger.warn('No ads profile ID found, skipping sync', {
+          accountId: target.account_id,
+          marketplace: target.country_code,
+        });
+        await SyncLogger.complete(syncLog.id, { processed: 0, inserted: 0, updated: 0, noProfile: true });
+        return { processed: 0, inserted: 0, skipped: true };
+      }
 
       const adsClient = new AdsApiClient(target);
 
-      // Fetch reports for each campaign type: SP, SB, SD
-      const campaignTypes = ['SP', 'SB', 'SD'];
+      // Sponsored Products only
+      const report = await adsClient.getAsinDailyReport({
+        profileId,
+        campaignType: 'SP',
+        startDate: fromStr,
+        endDate: toStr,
+      });
 
-      for (const campaignType of campaignTypes) {
-        const report = await adsClient.getAsinDailyReport({
-          profileId: this.getProfileId(target, target.country_code),
-          campaignType,
-          startDate: toDateStr(from),
-          endDate: toDateStr(to),
-        });
-
-        for (const row of report) {
-          processed++;
-          const result = await this.upsertAdsDailySpend(target, row, campaignType);
-          if (result === 'inserted') inserted++;
-        }
+      for (const row of report) {
+        processed++;
+        const result = await this.upsertAdsDailySpend(target, row, 'SP');
+        if (result === 'inserted') inserted++;
       }
 
-      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0 });
+      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: processed - inserted });
 
-      logger.info('Ads sync completed', {
+      logger.info('Historical ads sync completed', {
         accountId: target.account_id,
         marketplace: target.country_code,
+        from: fromStr,
+        to: toStr,
         processed,
         inserted,
+        updated: processed - inserted,
       });
 
       return { processed, inserted };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
-      logger.error('Ads sync failed', {
+      logger.error('Historical ads sync failed', {
         accountId: target.account_id,
         marketplace: target.country_code,
         error: err.message,
       });
       throw err;
     }
+  },
+
+  /**
+   * Fetch live intraday spend for today via SP campaigns stats endpoint.
+   * No DB persistence — returns JSON for dashboard usage.
+   */
+  async getLiveSpend(target) {
+    const profileId = this.getProfileId(target, target.country_code);
+    if (!profileId) {
+      logger.warn('No ads profile ID for live stats', {
+        accountId: target.account_id,
+        marketplace: target.country_code,
+      });
+      return { profileId: null, spend: 0, clicks: 0, sales: 0, impressions: 0, date: toDateStr(new Date()) };
+    }
+
+    const adsClient = new AdsApiClient(target);
+    const today = toDateStr(new Date());
+
+    logger.info('Fetching live ads spend', {
+      accountId: target.account_id,
+      marketplace: target.country_code,
+      date: today,
+      profileId,
+    });
+
+    const stats = await adsClient.getLiveStats({ profileId, date: today });
+
+    logger.info('Live ads spend fetched', {
+      accountId: target.account_id,
+      marketplace: target.country_code,
+      spend: stats.spend,
+      clicks: stats.clicks,
+    });
+
+    return {
+      profileId,
+      date: today,
+      marketplace: target.country_code,
+      currency: target.currency,
+      ...stats,
+    };
   },
 
   /**

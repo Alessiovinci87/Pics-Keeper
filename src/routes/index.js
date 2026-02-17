@@ -6,6 +6,7 @@ const alertRoutes = require('./alert.routes');
 const cashRoutes = require('./cash.routes');
 const asinCostRoutes = require('./asin-cost.routes');
 const syncRoutes = require('./sync.routes');
+const adsRoutes = require('../modules/ads/ads.routes');
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.use('/alerts', alertRoutes);
 router.use('/cash', cashRoutes);
 router.use('/asin-costs', asinCostRoutes);
 router.use('/sync', syncRoutes);
+router.use('/ads', adsRoutes);
 
 module.exports = router;
