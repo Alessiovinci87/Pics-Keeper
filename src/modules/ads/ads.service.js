@@ -1,11 +1,13 @@
 const db = require('../../database/pool');
 const logger = require('../../utils/logger');
-const { syncDateRange, toDateStr } = require('../../utils/helpers');
+const { toDateStr } = require('../../utils/helpers');
 const AdsApiClient = require('../../services/ads-api.client');
 const SyncLogger = require('../../services/sync-logger');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 dayjs.extend(utc);
+
+const MAX_DAYS_BACK = 14;
 
 /**
  * Ads Sync Service - fetches daily spend from Amazon Advertising API.
@@ -24,31 +26,42 @@ const AdsService = {
     let inserted = 0;
 
     try {
-      // Get raw sync range from shared helper
-      const { from, to } = syncDateRange(target.last_ads_sync_at, 14);
+      // Determine startDate from MAX(spend_date) in DB — the true source of truth
+      const lastSpendResult = await db.query(
+        `SELECT MAX(spend_date) AS last_spend_date
+         FROM ads_daily_spend
+         WHERE account_id = $1 AND marketplace_id = $2`,
+        [target.account_id, target.account_marketplace_id]
+      );
 
-      // Cap endDate at yesterday UTC — async reporting cannot produce intraday data
-      const yesterday = dayjs.utc().subtract(1, 'day').endOf('day');
-      const rawTo = dayjs.utc(to);
-      const cappedTo = rawTo.isBefore(yesterday) ? rawTo : yesterday;
-      const startDate = dayjs.utc(from).format('YYYY-MM-DD');
-      const endDate = cappedTo.format('YYYY-MM-DD');
+      const lastSpendDate = lastSpendResult.rows[0]?.last_spend_date || null;
+      const yesterday = dayjs.utc().subtract(1, 'day').format('YYYY-MM-DD');
 
-      logger.info('[Ads] Historical sync date range computed', {
+      let startDate;
+      if (lastSpendDate) {
+        // Resume from the day after the last persisted spend_date
+        startDate = dayjs.utc(lastSpendDate).add(1, 'day').format('YYYY-MM-DD');
+      } else {
+        // No data yet — backfill from maxDaysBack
+        startDate = dayjs.utc().subtract(MAX_DAYS_BACK, 'day').format('YYYY-MM-DD');
+      }
+      const endDate = yesterday;
+
+      logger.info('[Ads] Historical sync computed range', {
         accountId: target.account_id,
         marketplace: target.country_code,
-        rawFrom: toDateStr(from),
-        rawTo: toDateStr(to),
-        cappedEndDate: endDate,
-        yesterday: yesterday.format('YYYY-MM-DD'),
+        lastSpendDate: lastSpendDate || 'none',
+        startDate,
+        endDate,
+        skip: startDate > endDate,
       });
 
-      // If startDate > endDate, already synced up to yesterday — skip cleanly
+      // If startDate > endDate, all days up to yesterday are already covered
       if (startDate > endDate) {
         logger.info('[Ads] Sync skipped — already up to date', {
           accountId: target.account_id,
           marketplace: target.country_code,
-          lastSync: target.last_ads_sync_at,
+          lastSpendDate,
           startDate,
           endDate,
         });
