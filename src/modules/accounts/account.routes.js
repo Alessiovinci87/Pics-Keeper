@@ -45,4 +45,14 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
+// DELETE /api/accounts/:id
+router.delete('/:id', async (req, res, next) => {
+  try {
+    await AccountService.remove(parseInt(req.params.id, 10));
+    res.json({ message: 'Account deleted' });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

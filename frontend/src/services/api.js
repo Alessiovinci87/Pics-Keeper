@@ -42,6 +42,12 @@ export async function updateAccount(id, data) {
   return apiPatch(`/accounts/${id}`, data);
 }
 
+export async function deleteAccount(id) {
+  const response = await fetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`API error: ${response.status}`);
+  return response.json();
+}
+
 // ---- Products Dashboard ----
 export async function fetchProducts({ accountId, dateFrom, dateTo, page = 1, limit = 50 } = {}) {
   const params = { accountId, page, limit };

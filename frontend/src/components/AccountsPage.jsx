@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { createAccount, updateAccount } from '../services/api';
+import { createAccount, updateAccount, deleteAccount } from '../services/api';
 
 export default function AccountsPage({ accounts, onRefresh }) {
   const [showForm, setShowForm] = useState(false);
@@ -37,6 +37,18 @@ export default function AccountsPage({ accounts, onRefresh }) {
     }
   }
 
+  async function handleDelete(id, name) {
+    if (!confirm(`Sei sicuro di voler eliminare l'account "${name}"? Tutti i dati associati verranno cancellati.`)) {
+      return;
+    }
+    try {
+      await deleteAccount(id);
+      onRefresh();
+    } catch (err) {
+      alert('Errore: ' + err.message);
+    }
+  }
+
   return (
     <div className="page-container">
       <div className="page-header">
@@ -50,10 +62,10 @@ export default function AccountsPage({ accounts, onRefresh }) {
         <form className="form-card" onSubmit={handleCreate}>
           <div className="form-grid">
             <input placeholder="Nome Account" value={form.name} onChange={(e) => setForm({...form, name: e.target.value})} required />
-            <input placeholder="Seller ID" value={form.sellerId} onChange={(e) => setForm({...form, sellerId: e.target.value})} required />
-            <input placeholder="SP-API Refresh Token" value={form.spApiRefreshToken} onChange={(e) => setForm({...form, spApiRefreshToken: e.target.value})} />
+            <input placeholder="Seller ID (es: A1B2C3D4E5F6G7)" value={form.sellerId} onChange={(e) => setForm({...form, sellerId: e.target.value})} required />
+            <input placeholder="SP-API Refresh Token (Atzr|...)" value={form.spApiRefreshToken} onChange={(e) => setForm({...form, spApiRefreshToken: e.target.value})} />
             <input placeholder="Ads API Refresh Token" value={form.adsApiRefreshToken} onChange={(e) => setForm({...form, adsApiRefreshToken: e.target.value})} />
-            <input placeholder="Marketplace IDs (es: 1,2,3)" value={form.marketplaceIds} onChange={(e) => setForm({...form, marketplaceIds: e.target.value})} />
+            <input placeholder="Marketplace IDs (es: 1,2,3,4,5)" value={form.marketplaceIds} onChange={(e) => setForm({...form, marketplaceIds: e.target.value})} />
           </div>
           <p className="form-help">
             Marketplace IDs: 1=DE, 2=FR, 3=IT, 4=ES, 5=GB, 6=NL, 7=SE, 8=PL, 9=TR, 10=BE, 11=US, 12=CA
@@ -86,7 +98,10 @@ export default function AccountsPage({ accounts, onRefresh }) {
                 </div>
                 <div className="account-field">
                   <span className="field-label">SP-API</span>
-                  <span className="field-value">{acc.sp_api_refresh_token ? 'Configurato' : 'Non configurato'}</span>
+                  <span className="field-value">
+                    {acc.sp_api_refresh_token && acc.sp_api_refresh_token !== 'IL_TUO_REFRESH_TOKEN'
+                      ? 'Configurato' : 'Non configurato'}
+                  </span>
                 </div>
                 <div className="account-field">
                   <span className="field-label">Ads API</span>
@@ -107,6 +122,12 @@ export default function AccountsPage({ accounts, onRefresh }) {
                   onClick={() => toggleActive(acc.id, acc.is_active)}
                 >
                   {acc.is_active ? 'Disattiva' : 'Attiva'}
+                </button>
+                <button
+                  className="btn btn-small btn-danger"
+                  onClick={() => handleDelete(acc.id, acc.name)}
+                >
+                  Elimina
                 </button>
               </div>
             </div>

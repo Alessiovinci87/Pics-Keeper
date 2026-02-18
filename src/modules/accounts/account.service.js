@@ -116,6 +116,31 @@ const AccountService = {
   },
 
   /**
+   * Delete an account and all its related data.
+   */
+  async remove(id) {
+    return db.transaction(async (client) => {
+      // Delete related data first (foreign key cascade should handle most, but be explicit)
+      await client.query('DELETE FROM account_marketplaces WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM sync_log WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM alerts WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM alert_thresholds WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM payout_reconciliation WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM order_profit WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM asin_daily_metrics WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM account_daily_kpi WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM ads_daily_spend WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM financial_events_raw WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM orders_raw WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM asin_costs WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM asins WHERE account_id = $1', [id]);
+      const result = await client.query('DELETE FROM accounts WHERE id = $1 RETURNING id', [id]);
+      if (result.rows.length === 0) throw new NotFoundError('Account');
+      logger.info('Account deleted', { accountId: id });
+    });
+  },
+
+  /**
    * Get all active account+marketplace combos for sync jobs.
    */
   async getActiveSyncTargets() {
