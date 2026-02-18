@@ -58,16 +58,16 @@ const AggregationService = {
         SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated) AS total_product_costs,
         SUM(op.net_profit) AS net_profit,
         CASE WHEN SUM(op.revenue) > 0
-          THEN ROUND((SUM(op.net_profit) / SUM(op.revenue)) * 100, 4)
+          THEN LEAST(GREATEST(ROUND((SUM(op.net_profit) / SUM(op.revenue)) * 100, 4), -9999), 9999)
           ELSE 0 END AS margin_pct,
         CASE WHEN SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated + op.ads_allocated) > 0
-          THEN ROUND((SUM(op.net_profit) / SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated + op.ads_allocated)) * 100, 4)
+          THEN LEAST(GREATEST(ROUND((SUM(op.net_profit) / SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated + op.ads_allocated)) * 100, 4), -9999), 9999)
           ELSE 0 END AS roi_pct,
         CASE WHEN COALESCE(ads.total_sales, 0) > 0
-          THEN ROUND((COALESCE(ads.total_spend, 0) / ads.total_sales) * 100, 4)
+          THEN LEAST(ROUND((COALESCE(ads.total_spend, 0) / ads.total_sales) * 100, 4), 9999)
           ELSE 0 END AS acos_pct,
         CASE WHEN SUM(op.revenue) > 0
-          THEN ROUND((COALESCE(ads.total_spend, 0) / SUM(op.revenue)) * 100, 4)
+          THEN LEAST(ROUND((COALESCE(ads.total_spend, 0) / SUM(op.revenue)) * 100, 4), 9999)
           ELSE 0 END AS tacos_pct,
         op.currency,
         NOW() AS computed_at
@@ -132,13 +132,13 @@ const AggregationService = {
         SUM(total_product_costs),
         SUM(net_profit),
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(total_product_costs + ads_spend) > 0
-          THEN ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(ads_spend) > 0 AND SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         currency,
         NOW()
       FROM asin_daily_metrics
@@ -189,13 +189,13 @@ const AggregationService = {
         SUM(total_product_costs),
         SUM(net_profit),
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(total_product_costs + ads_spend) > 0
-          THEN ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(ads_spend) > 0 AND SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         'EUR',
         NOW()
       FROM account_daily_kpi
@@ -329,10 +329,10 @@ const AggregationService = {
         SUM(net_profit) AS total_profit,
         SUM(ads_spend) AS total_ads_spend,
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(net_profit) / SUM(revenue)) * 100, 2)
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(revenue)) * 100, 2), -9999), 9999)
           ELSE 0 END AS avg_margin,
         CASE WHEN SUM(ads_spend) > 0 AND SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 2)
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 2), 9999)
           ELSE 0 END AS avg_tacos
        FROM account_daily_kpi adk
        WHERE ${conditions.join(' AND ')}`,

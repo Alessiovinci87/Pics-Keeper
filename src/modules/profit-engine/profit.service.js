@@ -307,10 +307,10 @@ const ProfitService = {
           refund_amount = $1,
           net_profit = revenue - $1 - total_costs,
           margin_pct = CASE WHEN revenue > 0
-            THEN ROUND(((revenue - $1 - total_costs) / revenue) * 100, 4)
+            THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / revenue) * 100, 4), -9999), 9999)
             ELSE 0 END,
           roi_pct = CASE WHEN (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated) > 0
-            THEN ROUND(((revenue - $1 - total_costs) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4)
+            THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4), -9999), 9999)
             ELSE 0 END,
           computed_at = NOW()
         WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,

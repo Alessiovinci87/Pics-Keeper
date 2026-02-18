@@ -16,7 +16,8 @@ function round(value, decimals = 2) {
  */
 function pct(numerator, denominator, decimals = 2) {
   if (!denominator || denominator === 0) return 0;
-  return round((numerator / denominator) * 100, decimals);
+  const result = round((numerator / denominator) * 100, decimals);
+  return Math.max(-9999, Math.min(9999, result));
 }
 
 /**
@@ -24,7 +25,8 @@ function pct(numerator, denominator, decimals = 2) {
  */
 function roi(profit, cost, decimals = 2) {
   if (!cost || cost === 0) return 0;
-  return round((profit / cost) * 100, decimals);
+  const result = round((profit / cost) * 100, decimals);
+  return Math.max(-9999, Math.min(9999, result));
 }
 
 /**
