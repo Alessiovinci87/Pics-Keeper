@@ -45,7 +45,8 @@ function toDateStr(dateInput) {
  * Build a date range for incremental sync: from lastSync to now, capped at maxDays.
  */
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
-  const now = dayjs.utc();
+  // SP-API requires CreatedBefore/PostedBefore to be at least 2 min in the past
+  const now = dayjs.utc().subtract(5, 'minute');
   let from;
   if (lastSyncAt) {
     from = dayjs.utc(lastSyncAt);
