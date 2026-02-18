@@ -26,6 +26,7 @@ const config = {
 
   sync: {
     maxDaysBack: parseInt(process.env.SYNC_MAX_DAYS_BACK, 10) || 3,
+    profitDaysBack: parseInt(process.env.PROFIT_DAYS_BACK, 10) || 30,
   },
 
   cron: {

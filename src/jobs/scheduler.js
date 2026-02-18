@@ -135,7 +135,7 @@ async function syncAdsJob() {
 async function computeAndAggregateJob() {
   await withLock('compute-aggregate', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    const dateFrom = dayjs.utc().subtract(config.sync.maxDaysBack, 'day').format('YYYY-MM-DD');
+    const dateFrom = dayjs.utc().subtract(config.sync.profitDaysBack, 'day').format('YYYY-MM-DD');
     const dateTo = dayjs.utc().add(1, 'day').format('YYYY-MM-DD');
 
     // Group by account+marketplace to avoid duplicates
