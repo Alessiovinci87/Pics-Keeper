@@ -173,7 +173,7 @@ class SpApiClient {
    * Includes a small delay to respect rate limits between item fetches.
    */
   async getOrderItems(orderId) {
-    await sleep(500);
+    await sleep(2000);
     const result = await this.request('GET', `/orders/v0/orders/${orderId}/orderItems`);
     return result.OrderItems || [];
   }

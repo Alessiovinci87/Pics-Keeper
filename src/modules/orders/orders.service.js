@@ -41,6 +41,12 @@ const OrdersService = {
         const orders = response.Orders || [];
 
         for (const order of orders) {
+          // Skip orders already synced with the same status (avoids expensive getOrderItems call)
+          const alreadySynced = await this.isOrderSynced(target.account_id, order.AmazonOrderId, order.OrderStatus);
+          if (alreadySynced) {
+            continue;
+          }
+
           const items = await spApi.getOrderItems(order.AmazonOrderId);
 
           for (const item of items) {
@@ -75,6 +81,20 @@ const OrdersService = {
       });
       throw err;
     }
+  },
+
+  /**
+   * Check if an order is already synced with the same status.
+   * If status changed (e.g., Pending -> Shipped), we re-fetch items.
+   */
+  async isOrderSynced(accountId, amazonOrderId, currentStatus) {
+    const result = await db.query(
+      `SELECT order_status FROM orders_raw
+       WHERE account_id = $1 AND amazon_order_id = $2
+       LIMIT 1`,
+      [accountId, amazonOrderId]
+    );
+    return result.rows.length > 0 && result.rows[0].order_status === currentStatus;
   },
 
   /**
