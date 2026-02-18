@@ -187,6 +187,19 @@ class SpApiClient {
 
     return this.request('GET', '/finances/v0/financialEvents', params);
   }
+
+  /**
+   * Get catalog item details (images, title) for an ASIN.
+   * Uses Catalog Items API v2022-04-01.
+   */
+  async getCatalogItem(asin, marketplaceId) {
+    await sleep(500);
+    const result = await this.request('GET', `/catalog/2022-04-01/items/${asin}`, {
+      marketplaceIds: marketplaceId,
+      includedData: 'images,summaries',
+    });
+    return result;
+  }
 }
 
 module.exports = SpApiClient;

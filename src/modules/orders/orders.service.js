@@ -63,6 +63,11 @@ const OrdersService = {
         nextToken = response.NextToken || null;
       } while (nextToken);
 
+      // Backfill images for ASINs missing image_url (non-blocking)
+      this.backfillImages(target, spApi).catch((err) => {
+        logger.warn('Image backfill failed (non-critical)', { error: err.message });
+      });
+
       await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0 });
 
       logger.info('Orders sync completed', {
@@ -162,6 +167,64 @@ const OrdersService = {
   extractAmount(moneyObj) {
     if (!moneyObj) return 0;
     return parseFloat(moneyObj.Amount || moneyObj.amount || 0);
+  },
+
+  /**
+   * Backfill product images for ASINs without image_url.
+   * Calls SP-API Catalog Items API for each ASIN missing an image.
+   */
+  async backfillImages(target, spApi) {
+    const missing = await db.query(
+      `SELECT asin FROM asins
+       WHERE account_id = $1 AND image_url IS NULL
+       LIMIT 20`,
+      [target.account_id]
+    );
+
+    if (missing.rows.length === 0) return;
+
+    logger.info('Backfilling product images', {
+      accountId: target.account_id,
+      count: missing.rows.length,
+    });
+
+    for (const row of missing.rows) {
+      try {
+        const catalog = await spApi.getCatalogItem(row.asin, target.amazon_marketplace_id);
+
+        // Extract image URL from response
+        let imageUrl = null;
+        const images = catalog?.images;
+        if (images && images.length > 0) {
+          // Get the first image set's MAIN variant
+          const mainImage = images[0]?.images?.find((img) => img.variant === 'MAIN');
+          imageUrl = mainImage?.link || images[0]?.images?.[0]?.link || null;
+        }
+
+        // Extract title from summaries if we don't have one
+        let title = null;
+        const summaries = catalog?.summaries;
+        if (summaries && summaries.length > 0) {
+          title = summaries[0]?.itemName || null;
+        }
+
+        if (imageUrl || title) {
+          await db.query(
+            `UPDATE asins SET
+              image_url = COALESCE($1, image_url),
+              title = COALESCE($2, title),
+              updated_at = NOW()
+            WHERE account_id = $3 AND asin = $4`,
+            [imageUrl, title, target.account_id, row.asin]
+          );
+        }
+      } catch (err) {
+        logger.warn('Failed to fetch catalog item image', {
+          asin: row.asin,
+          error: err.message,
+        });
+      }
+    }
   },
 
   /**
