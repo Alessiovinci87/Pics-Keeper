@@ -71,7 +71,7 @@ const AlertsService = {
    */
   async checkNegativeProfit(accountId, date, thresholds) {
     const result = await db.query(
-      `SELECT asin, marketplace_id, metric_date, net_profit, revenue,
+      `SELECT adm.asin, adm.marketplace_id, adm.metric_date, adm.net_profit, adm.revenue,
               m.country_code
        FROM asin_daily_metrics adm
        LEFT JOIN marketplaces m ON m.id = adm.marketplace_id
@@ -104,7 +104,7 @@ const AlertsService = {
    */
   async checkLowRoi(accountId, date, thresholds) {
     const result = await db.query(
-      `SELECT asin, marketplace_id, metric_date, roi_pct, net_profit,
+      `SELECT adm.asin, adm.marketplace_id, adm.metric_date, adm.roi_pct, adm.net_profit,
               m.country_code
        FROM asin_daily_metrics adm
        LEFT JOIN marketplaces m ON m.id = adm.marketplace_id
@@ -138,7 +138,7 @@ const AlertsService = {
    */
   async checkHighAcos(accountId, date, thresholds) {
     const result = await db.query(
-      `SELECT asin, marketplace_id, metric_date, acos_pct, ads_spend,
+      `SELECT adm.asin, adm.marketplace_id, adm.metric_date, adm.acos_pct, adm.ads_spend,
               m.country_code
        FROM asin_daily_metrics adm
        LEFT JOIN marketplaces m ON m.id = adm.marketplace_id

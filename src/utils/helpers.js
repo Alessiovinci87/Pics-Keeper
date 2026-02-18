@@ -52,9 +52,10 @@ function syncDateRange(lastSyncAt, maxDaysBack = 30) {
   } else {
     from = now.subtract(maxDaysBack, 'day');
   }
+  // SP-API rejects ISO dates with milliseconds - use format without ms
   return {
-    from: from.toISOString(),
-    to: now.toISOString(),
+    from: from.format('YYYY-MM-DDTHH:mm:ss[Z]'),
+    to: now.format('YYYY-MM-DDTHH:mm:ss[Z]'),
   };
 }
 
