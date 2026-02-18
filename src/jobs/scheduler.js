@@ -8,10 +8,13 @@ const AdsService = require('../modules/ads/ads.service');
 const ProfitService = require('../modules/profit-engine/profit.service');
 const AggregationService = require('../modules/aggregation/aggregation.service');
 const AlertsService = require('../modules/alerts/alerts.service');
-const { toDateStr } = require('../utils/helpers');
+const { toDateStr, sleep } = require('../utils/helpers');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 dayjs.extend(utc);
+
+// Delay between marketplace syncs to respect API rate limits (ms)
+const MARKETPLACE_SYNC_DELAY = 4000;
 
 // Track running jobs to prevent overlap
 const runningJobs = new Set();
@@ -46,7 +49,8 @@ async function withLock(jobName, fn) {
 async function syncOrdersJob() {
   await withLock('sync-orders', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    for (const target of targets) {
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
       try {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
         await OrdersService.syncOrders(target);
@@ -61,6 +65,11 @@ async function syncOrdersJob() {
           error: err.message,
         });
       }
+      // Pause between marketplace syncs to avoid rate limiting
+      if (i < targets.length - 1) {
+        logger.info(`Waiting ${MARKETPLACE_SYNC_DELAY}ms before next marketplace sync`);
+        await sleep(MARKETPLACE_SYNC_DELAY);
+      }
     }
   });
 }
@@ -71,7 +80,8 @@ async function syncOrdersJob() {
 async function syncFinancialJob() {
   await withLock('sync-financial', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    for (const target of targets) {
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
       try {
         await FinancialService.syncFinancialEvents(target);
         await AccountService.updateSyncTimestamp(
@@ -84,6 +94,9 @@ async function syncFinancialJob() {
           error: err.message,
         });
       }
+      if (i < targets.length - 1) {
+        await sleep(MARKETPLACE_SYNC_DELAY);
+      }
     }
   });
 }
@@ -94,7 +107,8 @@ async function syncFinancialJob() {
 async function syncAdsJob() {
   await withLock('sync-ads', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    for (const target of targets) {
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
       try {
         await AdsService.syncAds(target);
         await AccountService.updateSyncTimestamp(
@@ -106,6 +120,9 @@ async function syncAdsJob() {
           marketplace: target.country_code,
           error: err.message,
         });
+      }
+      if (i < targets.length - 1) {
+        await sleep(MARKETPLACE_SYNC_DELAY);
       }
     }
   });
