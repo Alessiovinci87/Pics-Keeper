@@ -41,7 +41,7 @@ CREATE TABLE marketplaces (
 -- Seed EU + NA marketplaces
 INSERT INTO marketplaces (marketplace_id, country_code, name, region, currency) VALUES
     ('A1PA6795UKMFR9', 'DE', 'Amazon.de', 'EU', 'EUR'),
-    ('A13V1IB3VIYBER', 'FR', 'Amazon.fr', 'EU', 'EUR'),
+    ('A13V1IB3VIYZZH', 'FR', 'Amazon.fr', 'EU', 'EUR'),
     ('APJ6JRA9NG5V4',  'IT', 'Amazon.it', 'EU', 'EUR'),
     ('A1RKKUPIHCS9HS', 'ES', 'Amazon.es', 'EU', 'EUR'),
     ('A1F83G8C2ARO7P', 'GB', 'Amazon.co.uk', 'EU', 'GBP'),
@@ -50,7 +50,7 @@ INSERT INTO marketplaces (marketplace_id, country_code, name, region, currency) 
     ('A1C3SOZRARQ6R3', 'PL', 'Amazon.pl', 'EU', 'PLN'),
     ('A33AVAJ2PDY3EV', 'TR', 'Amazon.com.tr', 'EU', 'TRY'),
     ('A17E79C6D8DWNP', 'BE', 'Amazon.com.be', 'EU', 'EUR'),
-    ('ATVPDKIKX0DER',  'US', 'Amazon.com', 'NA', 'USD'),
+    ('ATVPDKIKX0DE',   'US', 'Amazon.com', 'NA', 'USD'),
     ('A2EUQ1WTGCTBG2', 'CA', 'Amazon.ca', 'NA', 'CAD')
 ON CONFLICT (marketplace_id) DO NOTHING;
 
