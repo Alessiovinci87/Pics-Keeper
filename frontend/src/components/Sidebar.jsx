@@ -1,39 +1,58 @@
-export default function Sidebar({ activeSection }) {
+export default function Sidebar({ activeSection, onNavigate, accounts, selectedAccountId, onAccountChange, backendConnected }) {
+  const navItems = [
+    { key: 'products', icon: '\u2630', label: 'Prodotti' },
+    { key: 'alerts', icon: '\uD83D\uDD14', label: 'Avvisi' },
+    { key: 'costs', icon: '\uD83D\uDCB5', label: 'Costi ASIN' },
+    { key: 'cash', icon: '\uD83D\uDCB0', label: 'Riconciliazione' },
+    { key: 'accounts', icon: '\uD83D\uDC64', label: 'Account' },
+    { key: 'sync', icon: '\u26A1', label: 'Sync' },
+  ];
+
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
         <span className="logo-icon">&#9881;</span>
         <span className="logo-text">Pics Keeper</span>
       </div>
+
+      {/* Account selector */}
+      <div className="sidebar-account-selector">
+        <label className="account-selector-label">Account</label>
+        {accounts && accounts.length > 0 ? (
+          <select
+            className="account-select"
+            value={selectedAccountId || ''}
+            onChange={(e) => onAccountChange(parseInt(e.target.value, 10))}
+          >
+            {accounts.map((acc) => (
+              <option key={acc.id} value={acc.id}>
+                {acc.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="account-select-empty">
+            {backendConnected ? 'Nessun account' : 'Non connesso'}
+          </div>
+        )}
+        <div className={`connection-indicator ${backendConnected ? 'connected' : 'disconnected'}`}>
+          <span className="indicator-dot" />
+          <span>{backendConnected ? 'Connesso' : 'Offline'}</span>
+        </div>
+      </div>
+
       <nav className="sidebar-nav">
-        <a href="#" className={`nav-item ${activeSection === 'dashboard' ? 'active' : ''}`}>
-          <span className="nav-icon">&#9632;</span>
-          <span>Dashboard</span>
-        </a>
-        <a href="#" className={`nav-item ${activeSection === 'products' ? 'active' : ''}`}>
-          <span className="nav-icon">&#9776;</span>
-          <span>Prodotti</span>
-        </a>
-        <a href="#" className={`nav-item ${activeSection === 'orders' ? 'active' : ''}`}>
-          <span className="nav-icon">&#128230;</span>
-          <span>Ordini</span>
-        </a>
-        <a href="#" className={`nav-item ${activeSection === 'alerts' ? 'active' : ''}`}>
-          <span className="nav-icon">&#128276;</span>
-          <span>Avvisi</span>
-        </a>
-        <a href="#" className={`nav-item ${activeSection === 'costs' ? 'active' : ''}`}>
-          <span className="nav-icon">&#128181;</span>
-          <span>Costi ASIN</span>
-        </a>
-        <a href="#" className={`nav-item ${activeSection === 'cash' ? 'active' : ''}`}>
-          <span className="nav-icon">&#128176;</span>
-          <span>Riconciliazione</span>
-        </a>
-        <a href="#" className={`nav-item ${activeSection === 'accounts' ? 'active' : ''}`}>
-          <span className="nav-icon">&#128100;</span>
-          <span>Account</span>
-        </a>
+        {navItems.map((item) => (
+          <a
+            key={item.key}
+            href="#"
+            className={`nav-item ${activeSection === item.key ? 'active' : ''}`}
+            onClick={(e) => { e.preventDefault(); onNavigate(item.key); }}
+          >
+            <span className="nav-icon">{item.icon}</span>
+            <span>{item.label}</span>
+          </a>
+        ))}
       </nav>
     </aside>
   );

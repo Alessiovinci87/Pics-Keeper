@@ -299,14 +299,18 @@ const ProfitService = {
 
       const refundAmount = round(Math.abs(parseFloat(refund.refund_total)), 4);
 
-      // Update the order_profit record with refund amount, then recalculate totals
+      // Update the order_profit record with refund amount, then recalculate totals.
+      // Refund reduces revenue (not a cost increase), so:
+      //   net_profit = revenue - refund_amount - total_costs
       await db.query(
         `UPDATE order_profit SET
           refund_amount = $1,
-          total_costs = total_costs + $1,
-          net_profit = revenue - (total_costs + $1),
+          net_profit = revenue - $1 - total_costs,
           margin_pct = CASE WHEN revenue > 0
-            THEN ROUND(((revenue - (total_costs + $1)) / revenue) * 100, 4)
+            THEN ROUND(((revenue - $1 - total_costs) / revenue) * 100, 4)
+            ELSE 0 END,
+          roi_pct = CASE WHEN (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated) > 0
+            THEN ROUND(((revenue - $1 - total_costs) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4)
             ELSE 0 END,
           computed_at = NOW()
         WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,
