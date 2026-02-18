@@ -52,12 +52,12 @@ const FinancialService = {
       return asinLookup.rows[0].asin;
     }
 
-    // If no mapping found, use SKU as fallback (some sellers use ASIN as SKU)
-    logger.warn('Could not resolve SellerSKU to ASIN, using SKU as fallback', {
+    // If no mapping found, return null (SKU may be too long for asin column)
+    logger.warn('Could not resolve SellerSKU to ASIN', {
       accountId,
       sellerSKU,
     });
-    return sellerSKU;
+    return null;
   },
 
   /**
