@@ -1,4 +1,5 @@
 const db = require('../../database/pool');
+const config = require('../../config');
 const logger = require('../../utils/logger');
 const { syncDateRange, toDateStr } = require('../../utils/helpers');
 const AdsApiClient = require('../../services/ads-api.client');
@@ -19,7 +20,7 @@ const AdsService = {
     let inserted = 0;
 
     try {
-      const { from, to } = syncDateRange(target.last_ads_sync_at, 14);
+      const { from, to } = syncDateRange(target.last_ads_sync_at, config.sync.maxDaysBack);
 
       logger.info('Starting ads sync', {
         accountId: target.account_id,

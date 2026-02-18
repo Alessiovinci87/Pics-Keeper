@@ -1,4 +1,5 @@
 const db = require('../../database/pool');
+const config = require('../../config');
 const logger = require('../../utils/logger');
 const { syncDateRange } = require('../../utils/helpers');
 const SpApiClient = require('../../services/sp-api.client');
@@ -69,7 +70,7 @@ const FinancialService = {
     let inserted = 0;
 
     try {
-      const { from, to } = syncDateRange(target.last_financial_sync_at, 30);
+      const { from, to } = syncDateRange(target.last_financial_sync_at, config.sync.maxDaysBack);
 
       logger.info('Starting financial sync', {
         accountId: target.account_id,
