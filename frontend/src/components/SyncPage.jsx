@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
-import { triggerSync, fetchSyncLogs } from '../services/api';
+import { triggerSync, fetchSyncLogs, resetSync } from '../services/api';
 
 export default function SyncPage({ accountId }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(null);
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     if (accountId) loadLogs();
@@ -32,6 +33,19 @@ export default function SyncPage({ accountId }) {
       alert('Errore: ' + err.message);
     } finally {
       setTriggering(null);
+    }
+  }
+
+  async function handleReset() {
+    if (!confirm('Resettare tutti i timestamp di sincronizzazione? Verrà avviato un re-sync completo degli ultimi 30 giorni.')) return;
+    setResetting(true);
+    try {
+      await resetSync({ accountId });
+      setTimeout(loadLogs, 3000);
+    } catch (err) {
+      alert('Errore: ' + err.message);
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -70,6 +84,22 @@ export default function SyncPage({ accountId }) {
             </button>
           </div>
         ))}
+      </div>
+
+      <div className="sync-actions" style={{ borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
+        <div className="sync-card" style={{ borderColor: 'var(--danger-color, #e74c3c)' }}>
+          <div>
+            <h3>Reset & Re-sync Completo</h3>
+            <p className="sync-desc">Resetta i timestamp e riscarica tutti gli ordini degli ultimi 30 giorni per tutti i marketplace</p>
+          </div>
+          <button
+            className="btn btn-danger"
+            disabled={resetting}
+            onClick={handleReset}
+          >
+            {resetting ? 'Reset in corso...' : 'Reset & Re-sync'}
+          </button>
+        </div>
       </div>
 
       <h2 style={{ padding: '20px 28px 10px', color: 'var(--text-primary)' }}>Log Recenti</h2>

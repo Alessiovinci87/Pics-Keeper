@@ -103,6 +103,13 @@ export async function fetchSyncLogs({ accountId, limit = 50 } = {}) {
   return apiFetch('/sync/log', { accountId, limit });
 }
 
+export async function resetSync({ accountId, marketplaceId, syncTypes } = {}) {
+  const body = { accountId };
+  if (marketplaceId) body.marketplaceId = marketplaceId;
+  if (syncTypes) body.syncTypes = syncTypes;
+  return apiPost('/sync/reset', body);
+}
+
 // ---- Health ----
 export async function healthCheck() {
   return apiFetch('/health');

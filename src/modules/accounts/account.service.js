@@ -189,6 +189,50 @@ const AccountService = {
   },
 
   /**
+   * Reset sync timestamps for an account+marketplace to force a full re-sync.
+   * If marketplaceId is null, resets all marketplaces for the account.
+   * syncTypes: array of 'orders', 'financial', 'ads' (default: all).
+   */
+  async resetSyncTimestamps(accountId, marketplaceId = null, syncTypes = ['orders', 'financial', 'ads']) {
+    const columnMap = {
+      orders: 'last_orders_sync_at',
+      financial: 'last_financial_sync_at',
+      ads: 'last_ads_sync_at',
+    };
+
+    const setClauses = syncTypes
+      .map((t) => columnMap[t])
+      .filter(Boolean)
+      .map((col) => `${col} = NULL`);
+
+    if (setClauses.length === 0) return;
+
+    setClauses.push("sync_status = 'idle'");
+
+    const conditions = ['account_id = $1'];
+    const params = [accountId];
+
+    if (marketplaceId) {
+      conditions.push('marketplace_id = $2');
+      params.push(marketplaceId);
+    }
+
+    const result = await db.query(
+      `UPDATE account_marketplaces SET ${setClauses.join(', ')} WHERE ${conditions.join(' AND ')} RETURNING marketplace_id`,
+      params
+    );
+
+    logger.info('Sync timestamps reset', {
+      accountId,
+      marketplaceId: marketplaceId || 'all',
+      syncTypes,
+      affected: result.rowCount,
+    });
+
+    return result.rowCount;
+  },
+
+  /**
    * Mark sync as running or failed.
    */
   async setSyncStatus(accountId, marketplaceId, status) {
