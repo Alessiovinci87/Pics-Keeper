@@ -18,6 +18,7 @@ const FinancialService = {
    * We resolve it from orders_raw and asins tables.
    */
   _skuToAsinCache: {},
+  _orderMarketplaceCache: {},
 
   async resolveSkuToAsin(accountId, sellerSKU) {
     if (!sellerSKU) return null;
@@ -59,6 +60,34 @@ const FinancialService = {
       sellerSKU,
     });
     return null;
+  },
+
+  /**
+   * Resolve the correct marketplace_id for an order from orders_raw.
+   * Financial Events API returns events for ALL marketplaces, so we need
+   * to look up the actual marketplace from the order data.
+   */
+  async resolveOrderMarketplace(accountId, amazonOrderId, fallbackMarketplaceId) {
+    if (!amazonOrderId) return fallbackMarketplaceId;
+
+    const cacheKey = `${accountId}:${amazonOrderId}`;
+    if (this._orderMarketplaceCache[cacheKey]) {
+      return this._orderMarketplaceCache[cacheKey];
+    }
+
+    const result = await db.query(
+      `SELECT marketplace_id FROM orders_raw
+       WHERE account_id = $1 AND amazon_order_id = $2
+       LIMIT 1`,
+      [accountId, amazonOrderId]
+    );
+
+    if (result.rows.length > 0) {
+      this._orderMarketplaceCache[cacheKey] = result.rows[0].marketplace_id;
+      return result.rows[0].marketplace_id;
+    }
+
+    return fallbackMarketplaceId;
   },
 
   /**
@@ -156,12 +185,16 @@ const FinancialService = {
     const orderId = event.AmazonOrderId;
     const asin = await this.resolveSkuToAsin(target.account_id, itemCharges.SellerSKU);
     const postedDate = event.PostedDate;
+    // Resolve the actual marketplace from orders_raw (Financial API returns ALL marketplaces)
+    const marketplaceId = await this.resolveOrderMarketplace(
+      target.account_id, orderId, target.account_marketplace_id
+    );
 
     // ItemChargeList: revenue components
     for (const charge of itemCharges.ItemChargeList || []) {
       rows.push({
         account_id: target.account_id,
-        marketplace_id: target.account_marketplace_id,
+        marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'ShipmentEvent',
@@ -178,7 +211,7 @@ const FinancialService = {
     for (const fee of itemCharges.ItemFeeList || []) {
       rows.push({
         account_id: target.account_id,
-        marketplace_id: target.account_marketplace_id,
+        marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'ShipmentEvent',
@@ -203,11 +236,15 @@ const FinancialService = {
     const orderId = event.AmazonOrderId;
     const asin = await this.resolveSkuToAsin(target.account_id, itemCharges.SellerSKU);
     const postedDate = event.PostedDate;
+    // Resolve the actual marketplace from orders_raw (Financial API returns ALL marketplaces)
+    const marketplaceId = await this.resolveOrderMarketplace(
+      target.account_id, orderId, target.account_marketplace_id
+    );
 
     for (const charge of itemCharges.ItemChargeList || []) {
       rows.push({
         account_id: target.account_id,
-        marketplace_id: target.account_marketplace_id,
+        marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'RefundEvent',
@@ -223,7 +260,7 @@ const FinancialService = {
     for (const fee of itemCharges.ItemFeeList || []) {
       rows.push({
         account_id: target.account_id,
-        marketplace_id: target.account_marketplace_id,
+        marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'RefundEvent',
@@ -274,6 +311,7 @@ const FinancialService = {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (account_id, amazon_order_id, event_type, fee_type, event_date)
       DO UPDATE SET
+        marketplace_id = EXCLUDED.marketplace_id,
         amount = EXCLUDED.amount,
         asin = COALESCE(EXCLUDED.asin, financial_events_raw.asin),
         raw_data = EXCLUDED.raw_data,

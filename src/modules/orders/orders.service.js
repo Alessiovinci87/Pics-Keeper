@@ -114,6 +114,7 @@ const OrdersService = {
         promotion_discount, order_status, purchase_date, currency, raw_data
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       ON CONFLICT (account_id, amazon_order_id, asin) DO UPDATE SET
+        marketplace_id = EXCLUDED.marketplace_id,
         quantity = EXCLUDED.quantity,
         item_price = EXCLUDED.item_price,
         item_tax = EXCLUDED.item_tax,

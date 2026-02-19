@@ -63,6 +63,10 @@ const ProfitService = {
         processed++;
       }
 
+      // Remove order_profit records for orders that are now Cancelled or Pending
+      // (they may have been computed before the status changed)
+      await this.cleanupCancelledOrders(accountId, marketplaceId, dateFrom, dateTo);
+
       // Process refunds: allocate to the actual refund event date
       await this.processRefunds(accountId, marketplaceId, dateFrom, dateTo);
 
@@ -248,6 +252,7 @@ const ProfitService = {
         total_costs, net_profit, margin_pct, roi_pct, currency, computed_at
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NOW())
       ON CONFLICT (account_id, amazon_order_id, asin) DO UPDATE SET
+        marketplace_id = EXCLUDED.marketplace_id,
         quantity = EXCLUDED.quantity,
         revenue = EXCLUDED.revenue,
         referral_fee = EXCLUDED.referral_fee,
@@ -275,6 +280,35 @@ const ProfitService = {
         totalCosts, netProfit, marginPct, roiPct, order.currency,
       ]
     );
+  },
+
+  /**
+   * Remove order_profit records for orders that are now Cancelled or Pending.
+   * These records may have been created when the order was in a valid status,
+   * but the order has since been cancelled.
+   */
+  async cleanupCancelledOrders(accountId, marketplaceId, dateFrom, dateTo) {
+    const result = await db.query(
+      `DELETE FROM order_profit op
+       USING orders_raw o
+       WHERE op.account_id = o.account_id
+         AND op.amazon_order_id = o.amazon_order_id
+         AND op.asin = o.asin
+         AND o.account_id = $1
+         AND o.marketplace_id = $2
+         AND o.purchase_date >= $3
+         AND o.purchase_date < $4
+         AND o.order_status IN ('Cancelled', 'Pending')`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+
+    if (result.rowCount > 0) {
+      logger.info('Cleaned up cancelled/pending order profit records', {
+        accountId,
+        marketplaceId,
+        deleted: result.rowCount,
+      });
+    }
   },
 
   /**
