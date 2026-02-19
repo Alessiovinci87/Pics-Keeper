@@ -45,15 +45,19 @@ function toDateStr(dateInput) {
 
 /**
  * Build a date range for incremental sync: from lastSync to now, capped at maxDays.
+ * Always goes back at least maxDaysBack to catch orders missed by earlier narrow windows.
  */
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
   // SP-API requires CreatedBefore/PostedBefore to be at least 2 min in the past
   const now = dayjs.utc().subtract(5, 'minute');
+  const maxFrom = now.subtract(maxDaysBack, 'day');
   let from;
   if (lastSyncAt) {
-    from = dayjs.utc(lastSyncAt);
+    const lastSync = dayjs.utc(lastSyncAt);
+    // Use the earlier date to ensure we always cover at least maxDaysBack
+    from = lastSync.isBefore(maxFrom) ? lastSync : maxFrom;
   } else {
-    from = now.subtract(maxDaysBack, 'day');
+    from = maxFrom;
   }
   // SP-API rejects ISO dates with milliseconds - use format without ms
   return {
