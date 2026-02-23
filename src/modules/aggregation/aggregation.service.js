@@ -203,7 +203,7 @@ const AggregationService = {
         AND marketplace_id IS NOT NULL
         AND kpi_date >= $2 AND kpi_date < $3
       GROUP BY account_id, kpi_date
-      ON CONFLICT (account_id, marketplace_id, kpi_date) DO UPDATE SET
+      ON CONFLICT (account_id, kpi_date) WHERE marketplace_id IS NULL DO UPDATE SET
         units_sold = EXCLUDED.units_sold,
         orders_count = EXCLUDED.orders_count,
         revenue = EXCLUDED.revenue,
