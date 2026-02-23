@@ -161,6 +161,28 @@
   color: var(--text-secondary);
 }
 
+.header-filters {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-marketplace-filter select {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 6px 10px;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.header-marketplace-filter select:focus {
+  border-color: var(--color-accent);
+}
+
 .header-date-filter {
   display: flex;
   align-items: center;

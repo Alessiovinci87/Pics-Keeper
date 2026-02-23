@@ -181,21 +181,26 @@ const OrdersService = {
     // to avoid overwriting Italian titles with other languages
     if (target.country_code !== 'IT') return;
 
-    const missing = await db.query(
+    // Fetch all ASINs, prioritizing those missing image/title,
+    // then those that may have non-Italian titles from earlier syncs
+    const toUpdate = await db.query(
       `SELECT asin FROM asins
-       WHERE account_id = $1 AND (image_url IS NULL OR title IS NULL)
+       WHERE account_id = $1
+       ORDER BY
+         CASE WHEN image_url IS NULL OR title IS NULL THEN 0 ELSE 1 END,
+         updated_at ASC
        LIMIT 20`,
       [target.account_id]
     );
 
-    if (missing.rows.length === 0) return;
+    if (toUpdate.rows.length === 0) return;
 
     logger.info('Backfilling product images and IT titles', {
       accountId: target.account_id,
-      count: missing.rows.length,
+      count: toUpdate.rows.length,
     });
 
-    for (const row of missing.rows) {
+    for (const row of toUpdate.rows) {
       try {
         // Always use IT marketplace for catalog to get Italian titles
         const catalog = await spApi.getCatalogItem(row.asin, target.amazon_marketplace_id);

@@ -1,6 +1,22 @@
+import { COUNTRY_FLAGS, COUNTRY_NAMES } from '../data/mockProducts';
 import { formatCurrency, formatNumber, formatPct } from '../utils/format';
 
-export default function DashboardHeader({ products, dateRange, onDateChange }) {
+const MARKETPLACE_OPTIONS = [
+  { code: null, label: 'Tutti i marketplace' },
+  { code: 'IT', label: 'Italia' },
+  { code: 'DE', label: 'Germania' },
+  { code: 'FR', label: 'Francia' },
+  { code: 'ES', label: 'Spagna' },
+  { code: 'GB', label: 'Regno Unito' },
+  { code: 'NL', label: 'Paesi Bassi' },
+  { code: 'BE', label: 'Belgio' },
+  { code: 'SE', label: 'Svezia' },
+  { code: 'PL', label: 'Polonia' },
+  { code: 'US', label: 'Stati Uniti' },
+  { code: 'CA', label: 'Canada' },
+];
+
+export default function DashboardHeader({ products, dateRange, onDateChange, selectedMarketplace, onMarketplaceChange }) {
   // Compute summary from all products
   const summary = products.reduce(
     (acc, p) => ({
@@ -26,19 +42,33 @@ export default function DashboardHeader({ products, dateRange, onDateChange }) {
           <h1 className="header-title">Prodotti</h1>
           <span className="header-subtitle">{products.length} prodotti attivi</span>
         </div>
-        <div className="header-date-filter">
-          <label>Da:</label>
-          <input
-            type="date"
-            value={dateRange.from}
-            onChange={(e) => onDateChange({ ...dateRange, from: e.target.value })}
-          />
-          <label>A:</label>
-          <input
-            type="date"
-            value={dateRange.to}
-            onChange={(e) => onDateChange({ ...dateRange, to: e.target.value })}
-          />
+        <div className="header-filters">
+          <div className="header-marketplace-filter">
+            <select
+              value={selectedMarketplace || ''}
+              onChange={(e) => onMarketplaceChange(e.target.value || null)}
+            >
+              {MARKETPLACE_OPTIONS.map((opt) => (
+                <option key={opt.code || 'all'} value={opt.code || ''}>
+                  {opt.code ? `${COUNTRY_FLAGS[opt.code] || ''} ${opt.label}` : opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="header-date-filter">
+            <label>Da:</label>
+            <input
+              type="date"
+              value={dateRange.from}
+              onChange={(e) => onDateChange({ ...dateRange, from: e.target.value })}
+            />
+            <label>A:</label>
+            <input
+              type="date"
+              value={dateRange.to}
+              onChange={(e) => onDateChange({ ...dateRange, to: e.target.value })}
+            />
+          </div>
         </div>
       </div>
 
