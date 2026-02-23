@@ -149,6 +149,8 @@ const OrdersService = {
 
   /**
    * Ensure ASIN exists in the asins table.
+   * Title is only set on first INSERT; subsequent syncs don't overwrite it
+   * (titles are managed by backfillImages using the IT catalog).
    */
   async ensureAsin(accountId, asin, sku, title) {
     await db.query(
@@ -156,7 +158,6 @@ const OrdersService = {
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (account_id, asin) DO UPDATE SET
          sku = COALESCE(EXCLUDED.sku, asins.sku),
-         title = COALESCE(EXCLUDED.title, asins.title),
          updated_at = NOW()`,
       [accountId, asin, sku || null, title || null]
     );
@@ -171,26 +172,32 @@ const OrdersService = {
   },
 
   /**
-   * Backfill product images for ASINs without image_url.
-   * Calls SP-API Catalog Items API for each ASIN missing an image.
+   * Backfill product images and titles for ASINs missing image_url.
+   * Always uses IT marketplace catalog for titles to ensure Italian language.
+   * Only runs during IT marketplace sync to avoid duplicate work.
    */
   async backfillImages(target, spApi) {
+    // Only run backfill during IT marketplace sync (country_code = 'IT')
+    // to avoid overwriting Italian titles with other languages
+    if (target.country_code !== 'IT') return;
+
     const missing = await db.query(
       `SELECT asin FROM asins
-       WHERE account_id = $1 AND image_url IS NULL
+       WHERE account_id = $1 AND (image_url IS NULL OR title IS NULL)
        LIMIT 20`,
       [target.account_id]
     );
 
     if (missing.rows.length === 0) return;
 
-    logger.info('Backfilling product images', {
+    logger.info('Backfilling product images and IT titles', {
       accountId: target.account_id,
       count: missing.rows.length,
     });
 
     for (const row of missing.rows) {
       try {
+        // Always use IT marketplace for catalog to get Italian titles
         const catalog = await spApi.getCatalogItem(row.asin, target.amazon_marketplace_id);
 
         // Extract image URL from response
@@ -202,7 +209,7 @@ const OrdersService = {
           imageUrl = mainImage?.link || images[0]?.images?.[0]?.link || null;
         }
 
-        // Extract title from summaries if we don't have one
+        // Extract Italian title from summaries
         let title = null;
         const summaries = catalog?.summaries;
         if (summaries && summaries.length > 0) {
