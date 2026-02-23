@@ -327,13 +327,15 @@ const FinancialService = {
 
     let query;
     if (row.amazon_order_id == null) {
-      // For NULL amazon_order_id (ServiceFeeEvents etc.), use partial index
+      // For NULL amazon_order_id (ServiceFeeEvents etc.), use partial index from migration 006
       query = `${insertCols}
       ON CONFLICT (account_id, event_type, fee_type, event_date) WHERE amazon_order_id IS NULL
       ${doUpdate}`;
     } else {
+      // For non-NULL amazon_order_id, use index that includes ASIN (migration 007)
+      // COALESCE handles NULL asin/fee_type in the unique index
       query = `${insertCols}
-      ON CONFLICT (account_id, amazon_order_id, event_type, fee_type, event_date)
+      ON CONFLICT (account_id, amazon_order_id, COALESCE(asin, ''), event_type, COALESCE(fee_type, ''), event_date) WHERE amazon_order_id IS NOT NULL
       ${doUpdate}`;
     }
 

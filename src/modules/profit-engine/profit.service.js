@@ -46,8 +46,9 @@ const ProfitService = {
         [accountId, marketplaceId, dateFrom, dateTo]
       );
 
-      // Pre-fetch financial events for all orders in range
-      const feeMap = await this.buildFeeMap(accountId, marketplaceId, dateFrom, dateTo);
+      // Pre-fetch financial events for the specific orders we're processing
+      const orderIds = ordersResult.rows.map(o => o.amazon_order_id);
+      const feeMap = await this.buildFeeMap(accountId, marketplaceId, orderIds);
 
       // Pre-fetch ASIN costs
       const costsMap = await this.buildCostsMap(accountId, marketplaceId);
@@ -82,24 +83,40 @@ const ProfitService = {
   },
 
   /**
-   * Build a map of Amazon fees by order_id -> fee_type -> amount.
+   * Build a map of Amazon fees by order_id:asin -> fee_type -> amount.
+   * Queries by specific order IDs (not date range) to avoid PostedDate vs PurchaseDate mismatch.
+   * Also builds a fallback map by order_id only (for events with NULL ASIN from unresolved SKUs).
    */
-  async buildFeeMap(accountId, marketplaceId, dateFrom, dateTo) {
+  async buildFeeMap(accountId, marketplaceId, orderIds) {
+    if (orderIds.length === 0) return {};
+
+    // Deduplicate order IDs
+    const uniqueOrderIds = [...new Set(orderIds)];
+
     const result = await db.query(
       `SELECT amazon_order_id, asin, fee_type, SUM(amount) AS total_amount
        FROM financial_events_raw
        WHERE account_id = $1 AND marketplace_id = $2
-         AND event_date >= $3 AND event_date < $4
+         AND amazon_order_id = ANY($3)
          AND event_type = 'ShipmentEvent'
        GROUP BY amazon_order_id, asin, fee_type`,
-      [accountId, marketplaceId, dateFrom, dateTo]
+      [accountId, marketplaceId, uniqueOrderIds]
     );
 
     const map = {};
     for (const row of result.rows) {
+      // Primary key: order_id:asin (exact match)
       const key = `${row.amazon_order_id}:${row.asin}`;
       if (!map[key]) map[key] = {};
       map[key][row.fee_type] = parseFloat(row.total_amount);
+
+      // Fallback key: order_id:* (aggregated across all ASINs for the order)
+      // Used when financial events have NULL ASIN (SKU resolution failed)
+      if (row.asin === null) {
+        const fallbackKey = `${row.amazon_order_id}:__fallback__`;
+        if (!map[fallbackKey]) map[fallbackKey] = {};
+        map[fallbackKey][row.fee_type] = (map[fallbackKey][row.fee_type] || 0) + parseFloat(row.total_amount);
+      }
     }
     return map;
   },
@@ -178,7 +195,8 @@ const ProfitService = {
   async computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap) {
     const orderDate = toDateStr(order.purchase_date);
     const feeKey = `${order.amazon_order_id}:${order.asin}`;
-    const fees = feeMap[feeKey] || {};
+    // Try exact match first, then fallback to NULL-ASIN entries (from unresolved SKUs)
+    const fees = feeMap[feeKey] || feeMap[`${order.amazon_order_id}:__fallback__`] || {};
     const costs = costsMap[order.asin] || {};
     const qty = order.quantity || 1;
 

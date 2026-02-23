@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
-import { triggerSync, fetchSyncLogs, resetSync } from '../services/api';
+import { triggerSync, fetchSyncLogs, resetSync, fixTitles } from '../services/api';
 
 export default function SyncPage({ accountId }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(null);
   const [resetting, setResetting] = useState(false);
+  const [fixingTitles, setFixingTitles] = useState(false);
+  const [successMsg, setSuccessMsg] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
 
   useEffect(() => {
@@ -47,6 +49,20 @@ export default function SyncPage({ accountId }) {
     }
   }
 
+  async function handleFixTitles() {
+    setFixingTitles(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const result = await fixTitles({ accountId });
+      setSuccessMsg(`Titoli aggiornati: ${result.updated}/${result.total_asins} ASIN dal catalogo IT`);
+    } catch (err) {
+      setErrorMsg(formatError(err));
+    } finally {
+      setFixingTitles(false);
+    }
+  }
+
   async function handleReset() {
     if (!confirm('Resettare tutti i timestamp di sincronizzazione? Verrà avviato un re-sync completo degli ultimi 30 giorni.')) return;
     setResetting(true);
@@ -85,6 +101,11 @@ export default function SyncPage({ accountId }) {
           {errorMsg}
         </div>
       )}
+      {successMsg && (
+        <div className="mock-banner" style={{ margin: '0 20px 16px', background: '#e8f5e9', color: '#2e7d32' }}>
+          {successMsg}
+        </div>
+      )}
 
       <div className="sync-actions">
         {jobTypes.map((job) => (
@@ -105,6 +126,19 @@ export default function SyncPage({ accountId }) {
       </div>
 
       <div className="sync-actions" style={{ borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
+        <div className="sync-card">
+          <div>
+            <h3>Aggiorna Titoli in Italiano</h3>
+            <p className="sync-desc">Scarica i titoli prodotto dal catalogo Amazon.it</p>
+          </div>
+          <button
+            className="btn btn-primary"
+            disabled={fixingTitles}
+            onClick={handleFixTitles}
+          >
+            {fixingTitles ? 'Aggiornamento...' : 'Aggiorna Titoli'}
+          </button>
+        </div>
         <div className="sync-card" style={{ borderColor: 'var(--danger-color, #e74c3c)' }}>
           <div>
             <h3>Reset & Re-sync Completo</h3>

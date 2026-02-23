@@ -110,6 +110,10 @@ export async function resetSync({ accountId, marketplaceId, syncTypes } = {}) {
   return apiPost('/sync/reset', body);
 }
 
+export async function fixTitles({ accountId } = {}) {
+  return apiPost('/sync/fix-titles', { accountId });
+}
+
 // ---- Health ----
 export async function healthCheck() {
   return apiFetch('/health');
