@@ -16,8 +16,26 @@ dayjs.extend(utc);
 // Delay between marketplace syncs to respect API rate limits (ms)
 const MARKETPLACE_SYNC_DELAY = 4000;
 
+// Max time for a single marketplace sync before aborting (5 minutes)
+const PER_MARKETPLACE_TIMEOUT = 5 * 60 * 1000;
+
 // Track running jobs to prevent overlap
 const runningJobs = new Set();
+
+/**
+ * Run an async function with a timeout. Rejects if timeout exceeded.
+ */
+function withTimeout(fn, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout after ${timeoutMs / 1000}s: ${label}`));
+    }, timeoutMs);
+
+    fn()
+      .then((result) => { clearTimeout(timer); resolve(result); })
+      .catch((err) => { clearTimeout(timer); reject(err); });
+  });
+}
 
 /**
  * Guard against overlapping execution of the same job type.
@@ -49,17 +67,29 @@ async function withLock(jobName, fn) {
 async function syncOrdersJob() {
   await withLock('sync-orders', async () => {
     const targets = await AccountService.getActiveSyncTargets();
+    logger.info(`Orders sync: ${targets.length} marketplace(s) to process`, {
+      marketplaces: targets.map(t => t.country_code).join(', '),
+    });
+
     for (let i = 0; i < targets.length; i++) {
       const target = targets[i];
+      const mpLabel = `orders ${target.country_code}`;
       try {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
-        await OrdersService.syncOrders(target);
+        logger.info(`[${i + 1}/${targets.length}] Starting ${mpLabel}`);
+
+        await withTimeout(
+          () => OrdersService.syncOrders(target),
+          PER_MARKETPLACE_TIMEOUT,
+          mpLabel
+        );
+
         await AccountService.updateSyncTimestamp(
           target.account_id, target.account_marketplace_id, 'orders', new Date().toISOString()
         );
       } catch (err) {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'failed');
-        logger.error('Orders sync failed for target', {
+        logger.error(`[${i + 1}/${targets.length}] ${mpLabel} failed`, {
           accountId: target.account_id,
           marketplace: target.country_code,
           error: err.message,
@@ -67,7 +97,6 @@ async function syncOrdersJob() {
       }
       // Pause between marketplace syncs to avoid rate limiting
       if (i < targets.length - 1) {
-        logger.info(`Waiting ${MARKETPLACE_SYNC_DELAY}ms before next marketplace sync`);
         await sleep(MARKETPLACE_SYNC_DELAY);
       }
     }
@@ -80,15 +109,23 @@ async function syncOrdersJob() {
 async function syncFinancialJob() {
   await withLock('sync-financial', async () => {
     const targets = await AccountService.getActiveSyncTargets();
+    logger.info(`Financial sync: ${targets.length} marketplace(s) to process`);
+
     for (let i = 0; i < targets.length; i++) {
       const target = targets[i];
+      const mpLabel = `financial ${target.country_code}`;
       try {
-        await FinancialService.syncFinancialEvents(target);
+        logger.info(`[${i + 1}/${targets.length}] Starting ${mpLabel}`);
+        await withTimeout(
+          () => FinancialService.syncFinancialEvents(target),
+          PER_MARKETPLACE_TIMEOUT,
+          mpLabel
+        );
         await AccountService.updateSyncTimestamp(
           target.account_id, target.account_marketplace_id, 'financial', new Date().toISOString()
         );
       } catch (err) {
-        logger.error('Financial sync failed for target', {
+        logger.error(`[${i + 1}/${targets.length}] ${mpLabel} failed`, {
           accountId: target.account_id,
           marketplace: target.country_code,
           error: err.message,

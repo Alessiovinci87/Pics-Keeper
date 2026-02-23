@@ -30,8 +30,12 @@ const OrdersService = {
 
       const spApi = new SpApiClient(target);
       let nextToken = null;
+      let totalOrders = 0;
+      let skipped = 0;
+      let page = 0;
 
       do {
+        page++;
         const response = await spApi.getOrders({
           MarketplaceIds: [target.amazon_marketplace_id],
           CreatedAfter: from,
@@ -40,11 +44,13 @@ const OrdersService = {
         });
 
         const orders = response.Orders || [];
+        totalOrders += orders.length;
 
         for (const order of orders) {
           // Skip orders already synced with the same status (avoids expensive getOrderItems call)
           const alreadySynced = await this.isOrderSynced(target.account_id, order.AmazonOrderId, order.OrderStatus);
           if (alreadySynced) {
+            skipped++;
             continue;
           }
 
@@ -61,6 +67,9 @@ const OrdersService = {
         }
 
         nextToken = response.NextToken || null;
+
+        // Progress logging every page
+        logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed`);
       } while (nextToken);
 
       // Backfill images for ASINs missing image_url (non-blocking)
