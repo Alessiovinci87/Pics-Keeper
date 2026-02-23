@@ -7,7 +7,6 @@ import AsinCostsPage from './components/AsinCostsPage';
 import CashPage from './components/CashPage';
 import AccountsPage from './components/AccountsPage';
 import SyncPage from './components/SyncPage';
-import mockProducts from './data/mockProducts';
 import { fetchProducts, fetchAccounts } from './services/api';
 import './App.css';
 
@@ -17,7 +16,6 @@ function App() {
   const [selectedAccountId, setSelectedAccountId] = useState(null);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [usingMock, setUsingMock] = useState(false);
   const [backendConnected, setBackendConnected] = useState(false);
   const [dateRange, setDateRange] = useState({
     from: new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0],
@@ -51,9 +49,8 @@ function App() {
   }
 
   async function loadProducts() {
-    if (!selectedAccountId && !usingMock) {
-      setProducts(mockProducts);
-      setUsingMock(true);
+    if (!selectedAccountId) {
+      setProducts([]);
       setLoading(false);
       return;
     }
@@ -65,10 +62,8 @@ function App() {
         dateTo: dateRange.to,
       });
       setProducts(result.data || []);
-      setUsingMock(false);
     } catch {
-      setProducts(mockProducts);
-      setUsingMock(true);
+      setProducts([]);
     } finally {
       setLoading(false);
     }
@@ -129,14 +124,14 @@ function App() {
         backendConnected={backendConnected}
       />
       <main className="main-content">
-        {usingMock && section === 'products' && (
-          <div className="mock-banner">
-            Dati demo — {!backendConnected ? 'Il backend non e\' ancora connesso' : 'Nessun account configurato, mostrando dati di esempio'}
-          </div>
-        )}
-        {!backendConnected && section !== 'products' && (
+        {!backendConnected && (
           <div className="mock-banner">
             Backend non connesso — Avvia il server con: npm start
+          </div>
+        )}
+        {backendConnected && !selectedAccountId && section === 'products' && (
+          <div className="mock-banner">
+            Nessun account configurato — Vai su "Account" per aggiungerne uno
           </div>
         )}
         {renderContent()}

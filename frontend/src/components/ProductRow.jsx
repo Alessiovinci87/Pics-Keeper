@@ -4,6 +4,7 @@ import { formatCurrency, formatNumber, formatPct, profitColorClass } from '../ut
 
 export default function ProductRow({ product, index }) {
   const [expanded, setExpanded] = useState(false);
+  const [imgError, setImgError] = useState(false);
 
   const p = product;
 
@@ -20,8 +21,8 @@ export default function ProductRow({ product, index }) {
         <td className="col-product">
           <div className="product-info">
             <div className="product-image-wrap">
-              {p.image_url ? (
-                <img src={p.image_url} alt={p.product_title} className="product-image" />
+              {p.image_url && !imgError ? (
+                <img src={p.image_url} alt={p.product_title} className="product-image" onError={() => setImgError(true)} />
               ) : (
                 <div className="product-image-placeholder" />
               )}

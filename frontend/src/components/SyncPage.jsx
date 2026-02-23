@@ -6,6 +6,7 @@ export default function SyncPage({ accountId }) {
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(null);
   const [resetting, setResetting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState(null);
 
   useEffect(() => {
     if (accountId) loadLogs();
@@ -23,14 +24,24 @@ export default function SyncPage({ accountId }) {
     }
   }
 
+  function formatError(err) {
+    if (err.message && err.message.includes('404')) {
+      return 'Backend non raggiungibile. Verifica che il server sia avviato (npm start).';
+    }
+    if (err.message && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError'))) {
+      return 'Impossibile connettersi al backend. Verifica che il server sia in esecuzione sulla porta 3000.';
+    }
+    return err.message || 'Errore sconosciuto';
+  }
+
   async function handleTrigger(jobType) {
     setTriggering(jobType);
+    setErrorMsg(null);
     try {
       await triggerSync(jobType);
-      // Reload logs after a short delay to show the new entry
       setTimeout(loadLogs, 2000);
     } catch (err) {
-      alert('Errore: ' + err.message);
+      setErrorMsg(formatError(err));
     } finally {
       setTriggering(null);
     }
@@ -39,11 +50,12 @@ export default function SyncPage({ accountId }) {
   async function handleReset() {
     if (!confirm('Resettare tutti i timestamp di sincronizzazione? Verrà avviato un re-sync completo degli ultimi 30 giorni.')) return;
     setResetting(true);
+    setErrorMsg(null);
     try {
       await resetSync({ accountId });
       setTimeout(loadLogs, 3000);
     } catch (err) {
-      alert('Errore: ' + err.message);
+      setErrorMsg(formatError(err));
     } finally {
       setResetting(false);
     }
@@ -67,6 +79,12 @@ export default function SyncPage({ accountId }) {
         <h1>Sincronizzazione</h1>
         <button className="btn btn-small" onClick={loadLogs}>Aggiorna Log</button>
       </div>
+
+      {errorMsg && (
+        <div className="mock-banner" style={{ margin: '0 20px 16px', background: 'var(--danger-bg, #fdecea)', color: 'var(--danger-color, #e74c3c)' }}>
+          {errorMsg}
+        </div>
+      )}
 
       <div className="sync-actions">
         {jobTypes.map((job) => (

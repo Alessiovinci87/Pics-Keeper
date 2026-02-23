@@ -17,8 +17,8 @@ router.get('/health', (_req, res) => {
 
 // Module routes
 router.use('/accounts', accountRoutes);
-router.use('/dashboard', dashboardRoutes);
 router.use('/dashboard/products', productDashboardRoutes);
+router.use('/dashboard', dashboardRoutes);
 router.use('/order', orderRoutes);
 router.use('/alerts', alertRoutes);
 router.use('/cash', cashRoutes);
