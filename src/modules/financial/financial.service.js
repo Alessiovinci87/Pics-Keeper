@@ -301,28 +301,43 @@ const FinancialService = {
 
   /**
    * Upsert a single financial event (idempotent).
+   * Uses different ON CONFLICT clauses for NULL vs non-NULL amazon_order_id,
+   * because PostgreSQL treats NULL != NULL in unique constraints.
    */
   async upsertEvent(row) {
-    const result = await db.query(
-      `INSERT INTO financial_events_raw (
+    const params = [
+      row.account_id, row.marketplace_id, row.amazon_order_id, row.asin,
+      row.event_type, row.fee_type, row.amount, row.currency,
+      row.event_date, row.posted_date, JSON.stringify(row.raw_data),
+    ];
+
+    const insertCols = `INSERT INTO financial_events_raw (
         account_id, marketplace_id, amazon_order_id, asin,
         event_type, fee_type, amount, currency,
         event_date, posted_date, raw_data
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      ON CONFLICT (account_id, amazon_order_id, event_type, fee_type, event_date)
-      DO UPDATE SET
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
+
+    const doUpdate = `DO UPDATE SET
         marketplace_id = EXCLUDED.marketplace_id,
         amount = EXCLUDED.amount,
         asin = COALESCE(EXCLUDED.asin, financial_events_raw.asin),
         raw_data = EXCLUDED.raw_data,
         synced_at = NOW()
-      RETURNING (xmax = 0) AS is_insert`,
-      [
-        row.account_id, row.marketplace_id, row.amazon_order_id, row.asin,
-        row.event_type, row.fee_type, row.amount, row.currency,
-        row.event_date, row.posted_date, JSON.stringify(row.raw_data),
-      ]
-    );
+      RETURNING (xmax = 0) AS is_insert`;
+
+    let query;
+    if (row.amazon_order_id == null) {
+      // For NULL amazon_order_id (ServiceFeeEvents etc.), use partial index
+      query = `${insertCols}
+      ON CONFLICT (account_id, event_type, fee_type, event_date) WHERE amazon_order_id IS NULL
+      ${doUpdate}`;
+    } else {
+      query = `${insertCols}
+      ON CONFLICT (account_id, amazon_order_id, event_type, fee_type, event_date)
+      ${doUpdate}`;
+    }
+
+    const result = await db.query(query, params);
     return result.rows[0]?.is_insert ? 'inserted' : 'updated';
   },
 
