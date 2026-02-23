@@ -170,10 +170,11 @@ class SpApiClient {
 
   /**
    * Get order items for a specific order.
-   * Includes a small delay to respect rate limits between item fetches.
+   * SP-API getOrderItems has a burst rate of 2 req/s and restore rate of 1 req/30s.
+   * We use 500ms base delay; the retry logic in request() handles 429 with backoff.
    */
   async getOrderItems(orderId) {
-    await sleep(2000);
+    await sleep(500);
     const result = await this.request('GET', `/orders/v0/orders/${orderId}/orderItems`);
     return result.OrderItems || [];
   }

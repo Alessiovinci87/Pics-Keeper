@@ -78,11 +78,8 @@ async function syncOrdersJob() {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
         logger.info(`[${i + 1}/${targets.length}] Starting ${mpLabel}`);
 
-        await withTimeout(
-          () => OrdersService.syncOrders(target),
-          PER_MARKETPLACE_TIMEOUT,
-          mpLabel
-        );
+        // No timeout for orders - large marketplaces (FR, IT) can take 30+ minutes
+        await OrdersService.syncOrders(target);
 
         await AccountService.updateSyncTimestamp(
           target.account_id, target.account_marketplace_id, 'orders', new Date().toISOString()
