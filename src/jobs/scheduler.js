@@ -101,34 +101,54 @@ async function syncOrdersJob() {
 }
 
 /**
- * Sync financial events for all active account+marketplace combos.
+ * Sync financial events for all active accounts.
+ *
+ * The Financial Events API returns events for ALL marketplaces of an account,
+ * so we group targets by account and call the API only ONCE per account.
+ * No per-marketplace timeout since the API returns all data in one stream.
  */
 async function syncFinancialJob() {
   await withLock('sync-financial', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    logger.info(`Financial sync: ${targets.length} marketplace(s) to process`);
 
-    for (let i = 0; i < targets.length; i++) {
-      const target = targets[i];
-      const mpLabel = `financial ${target.country_code}`;
+    // Group targets by account_id (Financial API returns all marketplaces per account)
+    const accountGroups = new Map();
+    for (const target of targets) {
+      if (!accountGroups.has(target.account_id)) {
+        accountGroups.set(target.account_id, []);
+      }
+      accountGroups.get(target.account_id).push(target);
+    }
+
+    logger.info(`Financial sync: ${accountGroups.size} account(s), ${targets.length} total marketplace(s)`);
+
+    let accountIdx = 0;
+    for (const [accountId, accountTargets] of accountGroups) {
+      accountIdx++;
       try {
-        logger.info(`[${i + 1}/${targets.length}] Starting ${mpLabel}`);
-        await withTimeout(
-          () => FinancialService.syncFinancialEvents(target),
-          PER_MARKETPLACE_TIMEOUT,
-          mpLabel
-        );
-        await AccountService.updateSyncTimestamp(
-          target.account_id, target.account_marketplace_id, 'financial', new Date().toISOString()
-        );
+        logger.info(`[${accountIdx}/${accountGroups.size}] Starting financial sync for account ${accountId} (${accountTargets.map(t => t.country_code).join(', ')})`);
+
+        // No timeout: financial sync processes all marketplaces in one API stream
+        // and can take a long time for high-volume accounts
+        await FinancialService.syncFinancialEventsForAccount(accountTargets);
+
+        // Update sync timestamp for ALL marketplaces of this account
+        const now = new Date().toISOString();
+        for (const target of accountTargets) {
+          await AccountService.updateSyncTimestamp(
+            target.account_id, target.account_marketplace_id, 'financial', now
+          );
+        }
+
+        logger.info(`[${accountIdx}/${accountGroups.size}] Financial sync completed for account ${accountId}`);
       } catch (err) {
-        logger.error(`[${i + 1}/${targets.length}] ${mpLabel} failed`, {
-          accountId: target.account_id,
-          marketplace: target.country_code,
+        logger.error(`[${accountIdx}/${accountGroups.size}] Financial sync failed for account ${accountId}`, {
           error: err.message,
         });
       }
-      if (i < targets.length - 1) {
+
+      // Pause between accounts
+      if (accountIdx < accountGroups.size) {
         await sleep(MARKETPLACE_SYNC_DELAY);
       }
     }

@@ -10,12 +10,17 @@ const SyncLogger = require('../../services/sync-logger');
  * Fetches financial events from Amazon SP-API Financial Events endpoint.
  * Handles: ShipmentEvents, RefundEvents, ServiceFeeEvents, etc.
  * Idempotent via ON CONFLICT.
+ *
+ * IMPORTANT: The Financial Events API returns events for ALL marketplaces
+ * of an account in a single call. We therefore sync once per account
+ * (not per marketplace) and resolve each event's marketplace from orders_raw.
  */
 const FinancialService = {
   /**
    * Cache of SellerSKU -> ASIN mappings per account.
    * Amazon Financial Events API only provides SellerSKU, not ASIN.
    * We resolve it from orders_raw and asins tables.
+   * Cleared after each account sync to prevent stale data.
    */
   _skuToAsinCache: {},
   _orderMarketplaceCache: {},
@@ -66,9 +71,12 @@ const FinancialService = {
    * Resolve the correct marketplace_id for an order from orders_raw.
    * Financial Events API returns events for ALL marketplaces, so we need
    * to look up the actual marketplace from the order data.
+   *
+   * Returns null if the order is not yet in orders_raw (event will be skipped
+   * and retried on the next sync cycle after orders have been synced).
    */
-  async resolveOrderMarketplace(accountId, amazonOrderId, fallbackMarketplaceId) {
-    if (!amazonOrderId) return fallbackMarketplaceId;
+  async resolveOrderMarketplace(accountId, amazonOrderId) {
+    if (!amazonOrderId) return null;
 
     const cacheKey = `${accountId}:${amazonOrderId}`;
     if (this._orderMarketplaceCache[cacheKey]) {
@@ -87,31 +95,79 @@ const FinancialService = {
       return result.rows[0].marketplace_id;
     }
 
-    return fallbackMarketplaceId;
+    // Order not yet synced - return null so the event is skipped.
+    // It will be picked up on the next financial sync after orders sync completes.
+    return null;
   },
 
   /**
-   * Sync financial events for a single account+marketplace.
+   * Clear in-memory caches. Called after each account sync to prevent
+   * stale data and unbounded memory growth.
    */
-  async syncFinancialEvents(target) {
-    const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'financial');
+  clearCaches() {
+    this._skuToAsinCache = {};
+    this._orderMarketplaceCache = {};
+  },
+
+  /**
+   * Sync financial events for an entire account (all marketplaces at once).
+   *
+   * The Financial Events API returns events for ALL marketplaces of the seller,
+   * so we call it only ONCE per account and resolve each event's marketplace
+   * from orders_raw. Events whose marketplace cannot be resolved (order not yet
+   * synced) are skipped and will be picked up on the next cycle.
+   *
+   * @param {Array} accountTargets - All active marketplace targets for one account.
+   */
+  async syncFinancialEventsForAccount(accountTargets) {
+    const accountId = accountTargets[0].account_id;
+    // Use first target for API credentials (all targets share the same account credentials)
+    const representative = accountTargets[0];
+
+    // Build set of valid marketplace IDs for this account
+    const validMarketplaceIds = new Set(accountTargets.map(t => t.account_marketplace_id));
+
+    // Build currency lookup by marketplace
+    const currencyByMarketplace = {};
+    for (const t of accountTargets) {
+      currencyByMarketplace[t.account_marketplace_id] = t.currency;
+    }
+
+    // Use earliest last_financial_sync_at across all marketplaces
+    // (null means at least one marketplace has never synced → use maxDaysBack)
+    let earliestSync = accountTargets[0].last_financial_sync_at;
+    for (const t of accountTargets) {
+      if (!t.last_financial_sync_at) {
+        earliestSync = null;
+        break;
+      }
+      if (t.last_financial_sync_at < earliestSync) {
+        earliestSync = t.last_financial_sync_at;
+      }
+    }
+
+    const { from, to } = syncDateRange(earliestSync, config.sync.maxDaysBack);
+
+    // Use null marketplace_id in sync_log for account-level sync
+    const syncLog = await SyncLogger.start(accountId, null, 'financial');
     let processed = 0;
     let inserted = 0;
+    let skipped = 0;
+    let pages = 0;
 
     try {
-      const { from, to } = syncDateRange(target.last_financial_sync_at, config.sync.maxDaysBack);
-
-      logger.info('Starting financial sync', {
-        accountId: target.account_id,
-        marketplace: target.country_code,
+      logger.info('Starting financial sync for account', {
+        accountId,
+        marketplaces: accountTargets.map(t => t.country_code).join(', '),
         from,
         to,
       });
 
-      const spApi = new SpApiClient(target);
+      const spApi = new SpApiClient(representative);
       let nextToken = null;
 
       do {
+        pages++;
         const response = await spApi.listFinancialEvents({
           PostedAfter: from,
           PostedBefore: to,
@@ -123,8 +179,10 @@ const FinancialService = {
         // Process ShipmentEventList (order-level fees)
         for (const event of eventList.ShipmentEventList || []) {
           for (const itemCharges of event.ShipmentItemList || []) {
-            const rows = await this.extractShipmentFees(target, event, itemCharges);
+            const rows = await this.extractShipmentFees(accountId, event, itemCharges, currencyByMarketplace);
             for (const row of rows) {
+              if (!row) { skipped++; continue; }
+              if (!validMarketplaceIds.has(row.marketplace_id)) { skipped++; continue; }
               processed++;
               const res = await this.upsertEvent(row);
               if (res === 'inserted') inserted++;
@@ -135,8 +193,10 @@ const FinancialService = {
         // Process RefundEventList
         for (const event of eventList.RefundEventList || []) {
           for (const itemCharges of event.ShipmentItemList || []) {
-            const rows = await this.extractRefundFees(target, event, itemCharges);
+            const rows = await this.extractRefundFees(accountId, event, itemCharges, currencyByMarketplace);
             for (const row of rows) {
+              if (!row) { skipped++; continue; }
+              if (!validMarketplaceIds.has(row.marketplace_id)) { skipped++; continue; }
               processed++;
               const res = await this.upsertEvent(row);
               if (res === 'inserted') inserted++;
@@ -145,32 +205,45 @@ const FinancialService = {
         }
 
         // Process ServiceFeeEventList (e.g., subscription fees)
+        // Service fees have no order ID, so attribute to first marketplace
         for (const event of eventList.ServiceFeeEventList || []) {
+          const row = this.extractServiceFee(accountId, accountTargets[0], event);
           processed++;
-          const row = this.extractServiceFee(target, event);
           const res = await this.upsertEvent(row);
           if (res === 'inserted') inserted++;
         }
 
         nextToken = response.NextToken || null;
+
+        // Progress logging every 5 pages
+        if (pages % 5 === 0) {
+          logger.info(`Financial sync account ${accountId}: page ${pages}, ${processed} processed, ${skipped} skipped, ${inserted} inserted`);
+        }
       } while (nextToken);
+
+      // Clear caches after sync to prevent stale data
+      this.clearCaches();
 
       await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0 });
 
-      logger.info('Financial sync completed', {
-        accountId: target.account_id,
-        marketplace: target.country_code,
+      logger.info('Financial sync completed for account', {
+        accountId,
+        pages,
         processed,
         inserted,
+        skipped,
       });
 
-      return { processed, inserted };
+      return { processed, inserted, skipped };
     } catch (err) {
+      this.clearCaches();
       await SyncLogger.fail(syncLog.id, err.message);
-      logger.error('Financial sync failed', {
-        accountId: target.account_id,
-        marketplace: target.country_code,
+      logger.error('Financial sync failed for account', {
+        accountId,
         error: err.message,
+        pages,
+        processed,
+        skipped,
       });
       throw err;
     }
@@ -179,28 +252,36 @@ const FinancialService = {
   /**
    * Extract fee rows from a shipment event item.
    * Resolves SellerSKU -> ASIN via DB lookup.
+   * Returns null entries for events whose marketplace cannot be resolved.
    */
-  async extractShipmentFees(target, event, itemCharges) {
+  async extractShipmentFees(accountId, event, itemCharges, currencyByMarketplace) {
     const rows = [];
     const orderId = event.AmazonOrderId;
-    const asin = await this.resolveSkuToAsin(target.account_id, itemCharges.SellerSKU);
+    const asin = await this.resolveSkuToAsin(accountId, itemCharges.SellerSKU);
     const postedDate = event.PostedDate;
-    // Resolve the actual marketplace from orders_raw (Financial API returns ALL marketplaces)
-    const marketplaceId = await this.resolveOrderMarketplace(
-      target.account_id, orderId, target.account_marketplace_id
-    );
+    // Resolve the actual marketplace from orders_raw
+    const marketplaceId = await this.resolveOrderMarketplace(accountId, orderId);
+
+    if (!marketplaceId) {
+      // Order not yet in orders_raw - skip these events (will retry next cycle)
+      const count = (itemCharges.ItemChargeList || []).length + (itemCharges.ItemFeeList || []).length;
+      for (let i = 0; i < count; i++) rows.push(null);
+      return rows;
+    }
+
+    const currency = currencyByMarketplace[marketplaceId] || 'EUR';
 
     // ItemChargeList: revenue components
     for (const charge of itemCharges.ItemChargeList || []) {
       rows.push({
-        account_id: target.account_id,
+        account_id: accountId,
         marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'ShipmentEvent',
         fee_type: charge.ChargeType,
         amount: parseFloat(charge.ChargeAmount?.CurrencyAmount || 0),
-        currency: charge.ChargeAmount?.CurrencyCode || target.currency,
+        currency: charge.ChargeAmount?.CurrencyCode || currency,
         event_date: postedDate,
         posted_date: postedDate,
         raw_data: charge,
@@ -210,14 +291,14 @@ const FinancialService = {
     // ItemFeeList: Amazon fees (referral, FBA, etc.)
     for (const fee of itemCharges.ItemFeeList || []) {
       rows.push({
-        account_id: target.account_id,
+        account_id: accountId,
         marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'ShipmentEvent',
         fee_type: fee.FeeType,
         amount: parseFloat(fee.FeeAmount?.CurrencyAmount || 0),
-        currency: fee.FeeAmount?.CurrencyCode || target.currency,
+        currency: fee.FeeAmount?.CurrencyCode || currency,
         event_date: postedDate,
         posted_date: postedDate,
         raw_data: fee,
@@ -230,27 +311,34 @@ const FinancialService = {
   /**
    * Extract refund event fees. Amounts are typically negative.
    * Resolves SellerSKU -> ASIN via DB lookup.
+   * Returns null entries for events whose marketplace cannot be resolved.
    */
-  async extractRefundFees(target, event, itemCharges) {
+  async extractRefundFees(accountId, event, itemCharges, currencyByMarketplace) {
     const rows = [];
     const orderId = event.AmazonOrderId;
-    const asin = await this.resolveSkuToAsin(target.account_id, itemCharges.SellerSKU);
+    const asin = await this.resolveSkuToAsin(accountId, itemCharges.SellerSKU);
     const postedDate = event.PostedDate;
-    // Resolve the actual marketplace from orders_raw (Financial API returns ALL marketplaces)
-    const marketplaceId = await this.resolveOrderMarketplace(
-      target.account_id, orderId, target.account_marketplace_id
-    );
+    // Resolve the actual marketplace from orders_raw
+    const marketplaceId = await this.resolveOrderMarketplace(accountId, orderId);
+
+    if (!marketplaceId) {
+      const count = (itemCharges.ItemChargeList || []).length + (itemCharges.ItemFeeList || []).length;
+      for (let i = 0; i < count; i++) rows.push(null);
+      return rows;
+    }
+
+    const currency = currencyByMarketplace[marketplaceId] || 'EUR';
 
     for (const charge of itemCharges.ItemChargeList || []) {
       rows.push({
-        account_id: target.account_id,
+        account_id: accountId,
         marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'RefundEvent',
         fee_type: charge.ChargeType,
         amount: parseFloat(charge.ChargeAmount?.CurrencyAmount || 0),
-        currency: charge.ChargeAmount?.CurrencyCode || target.currency,
+        currency: charge.ChargeAmount?.CurrencyCode || currency,
         event_date: postedDate,
         posted_date: postedDate,
         raw_data: charge,
@@ -259,14 +347,14 @@ const FinancialService = {
 
     for (const fee of itemCharges.ItemFeeList || []) {
       rows.push({
-        account_id: target.account_id,
+        account_id: accountId,
         marketplace_id: marketplaceId,
         amazon_order_id: orderId,
         asin,
         event_type: 'RefundEvent',
         fee_type: fee.FeeType,
         amount: parseFloat(fee.FeeAmount?.CurrencyAmount || 0),
-        currency: fee.FeeAmount?.CurrencyCode || target.currency,
+        currency: fee.FeeAmount?.CurrencyCode || currency,
         event_date: postedDate,
         posted_date: postedDate,
         raw_data: fee,
@@ -278,21 +366,23 @@ const FinancialService = {
 
   /**
    * Extract service fee event (subscription, etc.).
+   * Service fees are account-level, not per marketplace.
+   * We attribute them to the provided default marketplace.
    */
-  extractServiceFee(target, event) {
+  extractServiceFee(accountId, defaultTarget, event) {
     const totalAmount = (event.FeeList || []).reduce((sum, f) => {
       return sum + parseFloat(f.FeeAmount?.CurrencyAmount || 0);
     }, 0);
 
     return {
-      account_id: target.account_id,
-      marketplace_id: target.account_marketplace_id,
+      account_id: accountId,
+      marketplace_id: defaultTarget.account_marketplace_id,
       amazon_order_id: null,
       asin: null,
       event_type: 'ServiceFeeEvent',
       fee_type: event.FeeDescription || 'ServiceFee',
       amount: totalAmount,
-      currency: (event.FeeList?.[0]?.FeeAmount?.CurrencyCode) || target.currency,
+      currency: (event.FeeList?.[0]?.FeeAmount?.CurrencyCode) || defaultTarget.currency,
       event_date: event.PostedDate || new Date().toISOString(),
       posted_date: event.PostedDate,
       raw_data: event,
