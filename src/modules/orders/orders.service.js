@@ -34,6 +34,8 @@ const OrdersService = {
       let skipped = 0;
       let page = 0;
 
+      let errors = 0;
+
       do {
         page++;
         const response = await spApi.getOrders({
@@ -54,22 +56,32 @@ const OrdersService = {
             continue;
           }
 
-          const items = await spApi.getOrderItems(order.AmazonOrderId);
+          try {
+            const items = await spApi.getOrderItems(order.AmazonOrderId);
 
-          for (const item of items) {
-            processed++;
-            const result = await this.upsertOrderItem(target, order, item);
-            if (result === 'inserted') inserted++;
+            for (const item of items) {
+              processed++;
+              const result = await this.upsertOrderItem(target, order, item);
+              if (result === 'inserted') inserted++;
 
-            // Upsert ASIN if new
-            await this.ensureAsin(target.account_id, item.ASIN, item.SellerSKU, item.Title);
+              // Upsert ASIN if new
+              await this.ensureAsin(target.account_id, item.ASIN, item.SellerSKU, item.Title);
+            }
+          } catch (itemErr) {
+            errors++;
+            logger.warn(`Orders sync ${target.country_code}: failed to fetch items for ${order.AmazonOrderId}`, {
+              error: itemErr.message,
+              orderId: order.AmazonOrderId,
+              errors,
+            });
+            // Continue to next order instead of crashing the entire sync
           }
         }
 
         nextToken = response.NextToken || null;
 
         // Progress logging every page
-        logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed`);
+        logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed, ${errors} errors`);
       } while (nextToken);
 
       // Backfill images for ASINs missing image_url (non-blocking)
@@ -77,16 +89,19 @@ const OrdersService = {
         logger.warn('Image backfill failed (non-critical)', { error: err.message });
       });
 
-      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0 });
+      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0, errors, totalOrders, skipped });
 
       logger.info('Orders sync completed', {
         accountId: target.account_id,
         marketplace: target.country_code,
+        totalOrders,
         processed,
         inserted,
+        skipped,
+        errors,
       });
 
-      return { processed, inserted };
+      return { processed, inserted, errors, totalOrders, skipped };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
       logger.error('Orders sync failed', {
