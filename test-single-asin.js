@@ -1,10 +1,8 @@
 /**
- * Test script: verifica dati SP-API vs DB per un singolo ASIN.
+ * Test script: chiama SP-API e cerca ordini per un ASIN specifico.
  *
- * Uso: node test-single-asin.js [ASIN] [marketplace_country_code]
- * Es:  node test-single-asin.js B0XXXXXXXX FR
- *
- * Se non si passano parametri, prende l'ASIN con più ordini dal DB.
+ * Uso: node test-single-asin.js <ASIN> <country_code> [days_back]
+ * Es:  node test-single-asin.js B0BY9Q4KTT IT 30
  */
 require('dotenv').config();
 
@@ -15,64 +13,20 @@ const config = require('./src/config');
 const pool = new Pool(config.db);
 
 async function main() {
-  const targetAsin = process.argv[2] || null;
-  const targetCountry = process.argv[3] || null;
+  const asin = process.argv[2];
+  const countryCode = process.argv[3];
+  const daysBack = parseInt(process.argv[4] || '30', 10);
+
+  if (!asin || !countryCode) {
+    console.error('Uso: node test-single-asin.js <ASIN> <country_code> [days_back]');
+    console.error('Es:  node test-single-asin.js B0BY9Q4KTT IT 30');
+    process.exit(1);
+  }
 
   try {
-    // 1) Find ASIN to test
-    let asin, countryCode;
+    console.log(`\n=== Test ASIN: ${asin} su ${countryCode} (ultimi ${daysBack} giorni) ===\n`);
 
-    if (targetAsin && targetCountry) {
-      asin = targetAsin;
-      countryCode = targetCountry;
-      console.log(`\n=== Test ASIN: ${asin} su ${countryCode} ===\n`);
-    } else {
-      // Pick the ASIN with most orders
-      const { rows } = await pool.query(`
-        SELECT o.asin, m.country_code, COUNT(*) as cnt,
-               SUM(o.quantity) as units, SUM(o.item_price) as revenue
-        FROM orders_raw o
-        JOIN marketplaces m ON m.id = o.marketplace_id
-        WHERE o.account_id = 1
-        GROUP BY o.asin, m.country_code
-        ORDER BY cnt DESC
-        LIMIT 5
-      `);
-
-      if (rows.length === 0) {
-        console.error('Nessun ordine nel DB. Impossibile testare.');
-        process.exit(1);
-      }
-
-      console.log('\n=== Top 5 ASIN per numero ordini nel DB ===');
-      console.table(rows);
-
-      asin = rows[0].asin;
-      countryCode = rows[0].country_code;
-      console.log(`\nTesto: ${asin} su ${countryCode}\n`);
-    }
-
-    // 2) Get DB data for this ASIN
-    const dbOrders = await pool.query(`
-      SELECT o.amazon_order_id, o.asin, o.quantity, o.item_price, o.item_tax,
-             o.shipping_price, o.shipping_tax, o.promotion_discount,
-             o.order_status, o.purchase_date, o.currency,
-             m.country_code
-      FROM orders_raw o
-      JOIN marketplaces m ON m.id = o.marketplace_id
-      WHERE o.account_id = 1
-        AND o.asin = $1
-        AND m.country_code = $2
-      ORDER BY o.purchase_date DESC
-      LIMIT 10
-    `, [asin, countryCode]);
-
-    console.log(`=== DB: ${dbOrders.rows.length} ordini trovati (ultimi 10) ===`);
-    for (const r of dbOrders.rows) {
-      console.log(`  ${r.amazon_order_id} | qty=${r.quantity} | price=${r.item_price} | tax=${r.item_tax} | status=${r.order_status} | ${r.purchase_date}`);
-    }
-
-    // 3) Get account credentials + marketplace info
+    // 1) Get account credentials + marketplace info
     const { rows: targets } = await pool.query(`
       SELECT a.id as account_id, a.seller_id, a.sp_api_refresh_token,
              am.id as account_marketplace_id,
@@ -90,78 +44,120 @@ async function main() {
     }
 
     const target = targets[0];
-    console.log(`\nTarget: account=${target.account_id}, seller=${target.seller_id}, marketplace=${target.amazon_marketplace_id}, region=${target.region}`);
+    console.log(`Target: seller=${target.seller_id}, marketplace=${target.amazon_marketplace_id}, region=${target.region}\n`);
 
-    // 4) Call SP-API for a few specific orders to compare
+    // 2) Build date range
+    const now = new Date();
+    const from = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
+    // SP-API requires CreatedBefore to be at least 2 min in the past
+    const to = new Date(now.getTime() - 5 * 60 * 1000);
+
+    const fromISO = from.toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const toISO = to.toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+    console.log(`Date range: ${fromISO} -> ${toISO}\n`);
+
+    // 3) Call SP-API getOrders - paginate through all orders
     const spApi = new SpApiClient(target);
 
-    // Take first 3 orders from DB and verify each with the API
-    const testOrders = dbOrders.rows.slice(0, 3);
+    let nextToken = null;
+    let totalOrders = 0;
+    let matchingOrders = [];
+    let pageNum = 0;
 
-    console.log(`\n=== Chiamata SP-API per ${testOrders.length} ordini ===\n`);
+    console.log(`Scarico ordini da SP-API per ${countryCode}...`);
+    console.log(`(cerco ASIN ${asin} negli order items)\n`);
 
-    for (const dbOrder of testOrders) {
-      console.log(`--- Order: ${dbOrder.amazon_order_id} ---`);
+    do {
+      pageNum++;
+      const response = await spApi.getOrders({
+        MarketplaceIds: [target.amazon_marketplace_id],
+        CreatedAfter: fromISO,
+        CreatedBefore: toISO,
+        NextToken: nextToken,
+      });
 
-      try {
-        const apiItems = await spApi.getOrderItems(dbOrder.amazon_order_id);
+      const orders = response.Orders || [];
+      totalOrders += orders.length;
+      nextToken = response.NextToken || null;
 
-        // Find the matching ASIN in the API response
-        const apiItem = apiItems.find(i => i.ASIN === asin);
+      console.log(`  Pagina ${pageNum}: ${orders.length} ordini (totale finora: ${totalOrders})${nextToken ? ' [altra pagina...]' : ' [fine]'}`);
 
-        if (!apiItem) {
-          console.log(`  API: ASIN ${asin} NON trovato negli items!`);
-          console.log(`  API items:`, apiItems.map(i => i.ASIN));
-          continue;
+      // For each order, get items and check for our ASIN
+      for (const order of orders) {
+        // Skip cancelled orders
+        if (order.OrderStatus === 'Canceled') continue;
+
+        try {
+          const items = await spApi.getOrderItems(order.AmazonOrderId);
+          const match = items.find(i => i.ASIN === asin);
+
+          if (match) {
+            matchingOrders.push({
+              orderId: order.AmazonOrderId,
+              status: order.OrderStatus,
+              purchaseDate: order.PurchaseDate,
+              qty: match.QuantityOrdered,
+              itemPrice: match.ItemPrice,
+              itemTax: match.ItemTax,
+              shippingPrice: match.ShippingPrice,
+              shippingTax: match.ShippingTax,
+              promoDiscount: match.PromotionDiscount,
+              sku: match.SellerSKU,
+              title: match.Title,
+            });
+
+            console.log(`    >>> TROVATO! ${order.AmazonOrderId} | qty=${match.QuantityOrdered} | price=${match.ItemPrice?.Amount} ${match.ItemPrice?.CurrencyCode} | status=${order.OrderStatus} | ${order.PurchaseDate}`);
+          }
+        } catch (err) {
+          console.log(`    Errore getOrderItems(${order.AmazonOrderId}): ${err.message}`);
         }
+      }
 
-        const apiPrice = parseFloat(apiItem.ItemPrice?.Amount || 0);
-        const apiTax = parseFloat(apiItem.ItemTax?.Amount || 0);
-        const apiShipping = parseFloat(apiItem.ShippingPrice?.Amount || 0);
-        const apiShippingTax = parseFloat(apiItem.ShippingTax?.Amount || 0);
-        const apiPromoDiscount = parseFloat(apiItem.PromotionDiscount?.Amount || 0);
-        const apiQty = apiItem.QuantityOrdered || 0;
+      // Safety: stop after 500 orders to avoid excessive API calls
+      if (totalOrders >= 500 && nextToken) {
+        console.log(`\n  *** Fermato a ${totalOrders} ordini per sicurezza. Ci sono altre pagine. ***`);
+        break;
+      }
 
-        const dbPrice = parseFloat(dbOrder.item_price || 0);
-        const dbTax = parseFloat(dbOrder.item_tax || 0);
-        const dbShipping = parseFloat(dbOrder.shipping_price || 0);
-        const dbShippingTax = parseFloat(dbOrder.shipping_tax || 0);
-        const dbPromo = parseFloat(dbOrder.promotion_discount || 0);
-        const dbQty = parseInt(dbOrder.quantity || 0);
+    } while (nextToken);
 
-        console.log(`  Campo            | DB          | API         | Match`);
-        console.log(`  -----------------+-------------+-------------+------`);
-        console.log(`  Quantity         | ${pad(dbQty)}| ${pad(apiQty)}| ${dbQty === apiQty ? 'OK' : 'MISMATCH!'}`);
-        console.log(`  ItemPrice        | ${pad(dbPrice)}| ${pad(apiPrice)}| ${dbPrice === apiPrice ? 'OK' : 'MISMATCH!'}`);
-        console.log(`  ItemTax          | ${pad(dbTax)}| ${pad(apiTax)}| ${dbTax === apiTax ? 'OK' : 'MISMATCH!'}`);
-        console.log(`  ShippingPrice    | ${pad(dbShipping)}| ${pad(apiShipping)}| ${dbShipping === apiShipping ? 'OK' : 'MISMATCH!'}`);
-        console.log(`  ShippingTax      | ${pad(dbShippingTax)}| ${pad(apiShippingTax)}| ${dbShippingTax === apiShippingTax ? 'OK' : 'MISMATCH!'}`);
-        console.log(`  PromotionDiscount| ${pad(dbPromo)}| ${pad(apiPromoDiscount)}| ${dbPromo === apiPromoDiscount ? 'OK' : 'MISMATCH!'}`);
-        console.log(`  Currency         | ${dbOrder.currency || 'N/A'}       | ${apiItem.ItemPrice?.CurrencyCode || 'N/A'}       |`);
-        console.log();
+    // 4) Print results
+    console.log(`\n${'='.repeat(70)}`);
+    console.log(`RISULTATI: ${matchingOrders.length} ordini trovati per ASIN ${asin} su ${countryCode}`);
+    console.log(`(su ${totalOrders} ordini totali scansionati)`);
+    console.log(`${'='.repeat(70)}\n`);
 
-        // Also show raw API data for reference
-        console.log(`  RAW API response per questo item:`);
-        console.log(`  `, JSON.stringify({
-          ASIN: apiItem.ASIN,
-          SellerSKU: apiItem.SellerSKU,
-          Title: apiItem.Title?.substring(0, 60) + '...',
-          QuantityOrdered: apiItem.QuantityOrdered,
-          ItemPrice: apiItem.ItemPrice,
-          ItemTax: apiItem.ItemTax,
-          ShippingPrice: apiItem.ShippingPrice,
-          ShippingTax: apiItem.ShippingTax,
-          PromotionDiscount: apiItem.PromotionDiscount,
-        }, null, 2));
-        console.log();
+    if (matchingOrders.length === 0) {
+      console.log('Nessun ordine trovato per questo ASIN nel periodo.');
+    } else {
+      // Summary
+      let totalUnits = 0;
+      let totalRevenue = 0;
+      let totalTax = 0;
 
-      } catch (err) {
-        console.log(`  ERRORE API: ${err.message}`);
+      for (const o of matchingOrders) {
+        totalUnits += o.qty || 0;
+        totalRevenue += parseFloat(o.itemPrice?.Amount || 0);
+        totalTax += parseFloat(o.itemTax?.Amount || 0);
+      }
+
+      console.log(`TOTALI API:`);
+      console.log(`  Ordini:  ${matchingOrders.length}`);
+      console.log(`  Unità:   ${totalUnits}`);
+      console.log(`  Revenue: ${totalRevenue.toFixed(2)} ${matchingOrders[0]?.itemPrice?.CurrencyCode || ''}`);
+      console.log(`  Tax:     ${totalTax.toFixed(2)}`);
+      console.log(`  Titolo:  ${matchingOrders[0]?.title || 'N/A'}`);
+      console.log(`  SKU:     ${matchingOrders[0]?.sku || 'N/A'}`);
+
+      console.log(`\nDettaglio ordini:`);
+      for (const o of matchingOrders) {
+        console.log(`  ${o.purchaseDate} | ${o.orderId} | qty=${o.qty} | price=${o.itemPrice?.Amount} | tax=${o.itemTax?.Amount} | ship=${o.shippingPrice?.Amount || '0'} | promo=${o.promoDiscount?.Amount || '0'} | ${o.status}`);
       }
     }
 
-    // 5) Summary: totals from DB
-    const totals = await pool.query(`
+    // 5) Also check DB for comparison
+    const dbTotals = await pool.query(`
       SELECT COUNT(*) as ordini, SUM(quantity) as units,
              SUM(item_price) as revenue, SUM(item_tax) as tax
       FROM orders_raw
@@ -169,21 +165,23 @@ async function main() {
         AND marketplace_id = (SELECT id FROM marketplaces WHERE country_code = $2)
     `, [asin, countryCode]);
 
-    console.log(`\n=== TOTALI DB per ${asin} su ${countryCode} ===`);
-    console.log(`  Ordini: ${totals.rows[0].ordini}`);
-    console.log(`  Unità:  ${totals.rows[0].units}`);
-    console.log(`  Revenue: ${totals.rows[0].revenue}`);
-    console.log(`  Tax:     ${totals.rows[0].tax}`);
+    const db = dbTotals.rows[0];
+    console.log(`\nTOTALI DB (per confronto):`);
+    console.log(`  Ordini:  ${db.ordini}`);
+    console.log(`  Unità:   ${db.units || 0}`);
+    console.log(`  Revenue: ${db.revenue || 0}`);
+    console.log(`  Tax:     ${db.tax || 0}`);
+
+    if (parseInt(db.ordini) === 0 && matchingOrders.length > 0) {
+      console.log(`\n  ⚠ Il DB è vuoto per IT - gli ordini sync non hanno ancora coperto questo marketplace.`);
+      console.log(`  Una volta lanciata la sync ordini per IT, questi dati verranno importati.`);
+    }
 
   } catch (err) {
     console.error('Errore:', err);
   } finally {
     await pool.end();
   }
-}
-
-function pad(val) {
-  return String(val).padEnd(12);
 }
 
 main();
