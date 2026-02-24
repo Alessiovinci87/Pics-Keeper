@@ -1,5 +1,11 @@
 # CLAUDE.md - Istruzioni per Claude Code
 
+## PREFERENZE UTENTE
+- **L'utente usa Windows/PowerShell.** Non usare MAI `curl` negli esempi. Usare sempre `Invoke-RestMethod` (PowerShell). Esempio:
+  ```powershell
+  Invoke-RestMethod -Uri http://localhost:3000/api/sync/trigger/orders -Method POST
+  ```
+
 ## REGOLE CRITICHE - LEGGERE PRIMA DI FARE QUALSIASI COSA
 
 ### NON DISTRUGGERE IL DATABASE
