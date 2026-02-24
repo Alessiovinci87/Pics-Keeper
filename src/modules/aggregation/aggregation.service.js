@@ -105,7 +105,60 @@ const AggregationService = {
       [accountId, marketplaceId, dateFrom, dateTo]
     );
 
-    logger.debug('ASIN daily metrics aggregated', { accountId, marketplaceId });
+    // Second pass: include ads-only rows (ASINs with ads spend but no orders).
+    // Without this, marketplaces where you run PPC without sales would be invisible.
+    await db.query(
+      `INSERT INTO asin_daily_metrics (
+        account_id, marketplace_id, asin, metric_date,
+        units_sold, orders_count, revenue, total_amazon_fees, refunds,
+        ads_spend, total_product_costs, net_profit,
+        margin_pct, roi_pct, acos_pct, tacos_pct, currency, computed_at
+      )
+      SELECT
+        ads.account_id,
+        ads.marketplace_id,
+        ads.asin,
+        ads.spend_date AS metric_date,
+        0 AS units_sold,
+        0 AS orders_count,
+        0 AS revenue,
+        0 AS total_amazon_fees,
+        0 AS refunds,
+        SUM(ads.spend) AS ads_spend,
+        0 AS total_product_costs,
+        -SUM(ads.spend) AS net_profit,
+        0 AS margin_pct,
+        0 AS roi_pct,
+        CASE WHEN SUM(ads.sales) > 0
+          THEN LEAST(ROUND((SUM(ads.spend) / SUM(ads.sales)) * 100, 4), 9999)
+          ELSE 0 END AS acos_pct,
+        0 AS tacos_pct,
+        ads.currency,
+        NOW() AS computed_at
+      FROM ads_daily_spend ads
+      WHERE ads.account_id = $1
+        AND ads.marketplace_id = $2
+        AND ads.spend_date >= $3::date
+        AND ads.spend_date < $4::date
+        AND NOT EXISTS (
+          SELECT 1 FROM order_profit op
+          WHERE op.account_id = ads.account_id
+            AND op.marketplace_id = ads.marketplace_id
+            AND op.asin = ads.asin
+            AND op.order_date = ads.spend_date
+        )
+      GROUP BY ads.account_id, ads.marketplace_id, ads.asin, ads.spend_date, ads.currency
+      ON CONFLICT (account_id, marketplace_id, asin, metric_date) DO UPDATE SET
+        ads_spend = EXCLUDED.ads_spend,
+        net_profit = asin_daily_metrics.revenue - asin_daily_metrics.total_amazon_fees
+                     - asin_daily_metrics.refunds - EXCLUDED.ads_spend
+                     - asin_daily_metrics.total_product_costs,
+        acos_pct = EXCLUDED.acos_pct,
+        computed_at = NOW()`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+
+    logger.debug('ASIN daily metrics aggregated (incl. ads-only)', { accountId, marketplaceId });
   },
 
   /**
