@@ -93,11 +93,12 @@ const AccountService = {
     let idx = 1;
 
     const allowedFields = ['name', 'seller_id', 'sp_api_refresh_token', 'ads_api_refresh_token', 'ads_profile_ids', 'is_active'];
+    const jsonbFields = ['ads_profile_ids'];
     for (const [key, value] of Object.entries(updates)) {
       const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase(); // camelCase -> snake_case
       if (allowedFields.includes(dbKey)) {
         fields.push(`${dbKey} = $${idx}`);
-        values.push(value);
+        values.push(jsonbFields.includes(dbKey) ? JSON.stringify(value) : value);
         idx++;
       }
     }
