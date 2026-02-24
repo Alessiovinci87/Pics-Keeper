@@ -215,14 +215,28 @@ const ProfitService = {
       (fees['FBAWeightBasedFee'] || 0)
     ), 4);
 
-    // Other fees: everything not referral or FBA
+    // Other fees: everything not referral, FBA, or revenue charge types.
+    // IMPORTANT: financial_events_raw stores BOTH ItemChargeList (revenue) and
+    // ItemFeeList (fees) with event_type='ShipmentEvent'. We must exclude
+    // revenue charge types to avoid double-counting revenue as costs.
     const knownFeeTypes = [
       'Commission', 'ReferralFee',
       'FBAPerUnitFulfillmentFee', 'FBAPerOrderFulfillmentFee', 'FBAWeightBasedFee',
     ];
+    // Revenue/charge types from ItemChargeList — NOT Amazon fees.
+    // These are revenue components or discounts already in orders_raw.
+    const revenueChargeTypes = [
+      'Principal', 'Tax', 'ShippingCharge', 'ShippingTax',
+      'GiftWrap', 'GiftWrapTax', 'ShippingDiscount', 'PromotionDiscount',
+      'Goodwill', 'ExportCharge', 'RestockingFee',
+    ];
     let otherFees = 0;
     for (const [feeType, amount] of Object.entries(fees)) {
-      if (!knownFeeTypes.includes(feeType)) {
+      if (knownFeeTypes.includes(feeType)) continue;
+      if (revenueChargeTypes.includes(feeType)) continue;
+      if (feeType.startsWith('MarketplaceFacilitator')) continue;
+      // Safety net: only count negative amounts (actual fee deductions by Amazon)
+      if (amount < 0) {
         otherFees += Math.abs(amount);
       }
     }
