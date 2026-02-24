@@ -97,8 +97,13 @@ const AccountService = {
     for (const [key, value] of Object.entries(updates)) {
       const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase(); // camelCase -> snake_case
       if (allowedFields.includes(dbKey)) {
-        fields.push(`${dbKey} = $${idx}`);
-        values.push(jsonbFields.includes(dbKey) ? JSON.stringify(value) : value);
+        if (jsonbFields.includes(dbKey)) {
+          fields.push(`${dbKey} = $${idx}::jsonb`);
+          values.push(typeof value === 'string' ? value : JSON.stringify(value));
+        } else {
+          fields.push(`${dbKey} = $${idx}`);
+          values.push(value);
+        }
         idx++;
       }
     }
