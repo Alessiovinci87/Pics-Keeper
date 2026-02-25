@@ -27,15 +27,21 @@ router.post('/trigger/:jobType', async (req, res, next) => {
       });
     }
 
+    // Pass body options (e.g. dateFrom for historical sync) to the job
+    const options = {};
+    if (req.body && req.body.dateFrom) {
+      options.dateFrom = req.body.dateFrom;
+    }
+
     // Run async, don't wait
-    job().catch((err) => {
+    job(options).catch((err) => {
       require('../utils/logger').error('Manual job trigger failed', {
         jobType: req.params.jobType,
         error: err.message,
       });
     });
 
-    res.json({ message: `Job ${req.params.jobType} triggered` });
+    res.json({ message: `Job ${req.params.jobType} triggered`, options });
   } catch (err) {
     next(err);
   }

@@ -43,13 +43,13 @@ async function withLock(jobName, fn) {
 /**
  * Sync orders for all active account+marketplace combos.
  */
-async function syncOrdersJob() {
+async function syncOrdersJob(options = {}) {
   await withLock('sync-orders', async () => {
     const targets = await AccountService.getActiveSyncTargets();
     for (const target of targets) {
       try {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
-        await OrdersService.syncOrders(target);
+        await OrdersService.syncOrders(target, options);
         await AccountService.updateSyncTimestamp(
           target.account_id, target.account_marketplace_id, 'orders', new Date().toISOString()
         );

@@ -21,13 +21,20 @@ const OrdersService = {
   /**
    * Sync orders for a single account+marketplace.
    */
-  async syncOrders(target) {
+  async syncOrders(target, { dateFrom: overrideFrom } = {}) {
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'orders');
     let processed = 0;
     let inserted = 0;
 
     try {
-      const { from, to } = syncDateRange(target.last_orders_sync_at, 30);
+      // If overrideFrom provided (manual full sync), bypass syncDateRange entirely
+      let from, to;
+      if (overrideFrom) {
+        from = dayjs.utc(overrideFrom).startOf('day').toISOString();
+        to = dayjs.utc().toISOString();
+      } else {
+        ({ from, to } = syncDateRange(target.last_orders_sync_at, 30));
+      }
 
       // Subtract 3 minutes from "to" - SP-API requires CreatedBefore to be in the past
       const adjustedTo = dayjs.utc(to).subtract(3, 'minute').toISOString();
