@@ -155,28 +155,20 @@ class SpApiClient {
   }
 
   /**
-   * Get orders (paginated).
+   * Search orders (paginated) — Orders API v2026-01-01.
+   * Returns orders WITH embedded orderItems (no separate getOrderItems call needed).
+   * includedData: PROCEEDS (prices/taxes), FULFILLMENT (order status).
    */
-  async getOrders({ MarketplaceIds, CreatedAfter, CreatedBefore, NextToken }) {
+  async searchOrders({ marketplaceIds, createdAfter, createdBefore, paginationToken }) {
     const params = {
-      MarketplaceIds: MarketplaceIds.join(','),
-      CreatedAfter: CreatedAfter,
-      CreatedBefore: CreatedBefore,
+      marketplaceIds: marketplaceIds.join(','),
+      createdAfter,
+      createdBefore,
+      includedData: 'PROCEEDS,FULFILLMENT',
     };
-    if (NextToken) params.NextToken = NextToken;
+    if (paginationToken) params.paginationToken = paginationToken;
 
-    return this.request('GET', '/orders/v0/orders', params);
-  }
-
-  /**
-   * Get order items for a specific order.
-   * SP-API getOrderItems has a burst rate of 2 req/s and restore rate of 1 req/2s.
-   * We use 1s base delay to stay within restore rate and avoid 429 cascades.
-   */
-  async getOrderItems(orderId) {
-    await sleep(1000);
-    const result = await this.request('GET', `/orders/v0/orders/${orderId}/orderItems`);
-    return result.OrderItems || [];
+    return this.request('GET', '/orders/2026-01-01/orders', params);
   }
 
   /**

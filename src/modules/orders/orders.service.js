@@ -29,7 +29,7 @@ const OrdersService = {
       });
 
       const spApi = new SpApiClient(target);
-      let nextToken = null;
+      let paginationToken = null;
       let totalOrders = 0;
       let skipped = 0;
       let page = 0;
@@ -38,26 +38,29 @@ const OrdersService = {
 
       do {
         page++;
-        const response = await spApi.getOrders({
-          MarketplaceIds: [target.amazon_marketplace_id],
-          CreatedAfter: from,
-          CreatedBefore: to,
-          NextToken: nextToken,
+        const response = await spApi.searchOrders({
+          marketplaceIds: [target.amazon_marketplace_id],
+          createdAfter: from,
+          createdBefore: to,
+          paginationToken,
         });
 
-        const orders = response.Orders || [];
+        const orders = response.orders || [];
         totalOrders += orders.length;
 
         for (const order of orders) {
-          // Skip orders already synced with the same status (avoids expensive getOrderItems call)
-          const alreadySynced = await this.isOrderSynced(target.account_id, order.AmazonOrderId, order.OrderStatus);
+          const orderId = order.orderId;
+          const orderStatus = order.fulfillment?.fulfillmentStatus || 'UNKNOWN';
+
+          const alreadySynced = await this.isOrderSynced(target.account_id, orderId, orderStatus);
           if (alreadySynced) {
             skipped++;
             continue;
           }
 
           try {
-            const items = await spApi.getOrderItems(order.AmazonOrderId);
+            // v2026-01-01: items are embedded in the order response
+            const items = order.orderItems || [];
 
             for (const item of items) {
               processed++;
@@ -65,24 +68,28 @@ const OrdersService = {
               if (result === 'inserted') inserted++;
 
               // Upsert ASIN if new
-              await this.ensureAsin(target.account_id, item.ASIN, item.SellerSKU, item.Title);
+              await this.ensureAsin(
+                target.account_id,
+                item.product?.asin,
+                item.product?.sellerSku,
+                item.product?.title
+              );
             }
           } catch (itemErr) {
             errors++;
-            logger.warn(`Orders sync ${target.country_code}: failed to fetch items for ${order.AmazonOrderId}`, {
+            logger.warn(`Orders sync ${target.country_code}: failed to process items for ${orderId}`, {
               error: itemErr.message,
-              orderId: order.AmazonOrderId,
+              orderId,
               errors,
             });
-            // Continue to next order instead of crashing the entire sync
           }
         }
 
-        nextToken = response.NextToken || null;
+        paginationToken = response.pagination?.nextToken || null;
 
         // Progress logging every page
         logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed, ${errors} errors`);
-      } while (nextToken);
+      } while (paginationToken);
 
       // Backfill images for ASINs missing image_url (non-blocking)
       this.backfillImages(target, spApi).catch((err) => {
@@ -129,6 +136,7 @@ const OrdersService = {
 
   /**
    * Upsert a single order item (idempotent via ON CONFLICT).
+   * Adapted for Orders API v2026-01-01 response format.
    */
   async upsertOrderItem(target, order, item) {
     const result = await db.query(
@@ -152,18 +160,18 @@ const OrdersService = {
       [
         target.account_id,
         target.account_marketplace_id,
-        order.AmazonOrderId,
-        item.ASIN,
-        item.SellerSKU || null,
-        item.QuantityOrdered || 1,
-        this.extractAmount(item.ItemPrice),
-        this.extractAmount(item.ItemTax),
-        this.extractAmount(item.ShippingPrice),
-        this.extractAmount(item.ShippingTax),
-        this.extractAmount(item.PromotionDiscount),
-        order.OrderStatus,
-        order.PurchaseDate,
-        order.OrderTotal?.CurrencyCode || target.currency,
+        order.orderId,
+        item.product?.asin,
+        item.product?.sellerSku || null,
+        item.quantityOrdered || 1,
+        this.extractProceeds(item, 'ITEM'),
+        this.extractTaxDetail(item, 'ITEM'),
+        this.extractProceeds(item, 'SHIPPING'),
+        this.extractTaxDetail(item, 'SHIPPING'),
+        this.extractProceeds(item, 'DISCOUNT'),
+        order.fulfillment?.fulfillmentStatus || 'UNKNOWN',
+        order.createdTime,
+        order.proceeds?.grandTotal?.currencyCode || target.currency,
         JSON.stringify({ order, item }),
       ]
     );
@@ -188,11 +196,31 @@ const OrdersService = {
   },
 
   /**
-   * Extract numeric amount from Amazon Money object { CurrencyCode, Amount }.
+   * Extract proceeds amount from item breakdowns by type (ITEM, SHIPPING, DISCOUNT, etc.).
+   * v2026-01-01 format: item.proceeds.breakdowns[].type / .subtotal.amount
    */
-  extractAmount(moneyObj) {
-    if (!moneyObj) return 0;
-    return parseFloat(moneyObj.Amount || moneyObj.amount || 0);
+  extractProceeds(item, type) {
+    const breakdowns = item.proceeds?.breakdowns || [];
+    const breakdown = breakdowns.find((b) => b.type === type);
+    return breakdown?.subtotal ? parseFloat(breakdown.subtotal.amount || 0) : 0;
+  },
+
+  /**
+   * Extract detailed tax amount from item breakdowns by subtype (ITEM, SHIPPING, etc.).
+   * v2026-01-01 format: TAX breakdown -> detailedBreakdowns[].subtype / .value.amount
+   */
+  extractTaxDetail(item, subtype) {
+    const breakdowns = item.proceeds?.breakdowns || [];
+    const taxBreakdown = breakdowns.find((b) => b.type === 'TAX');
+    if (!taxBreakdown?.detailedBreakdowns) {
+      // If no detailed breakdowns, return total tax for ITEM subtype, 0 otherwise
+      if (subtype === 'ITEM' && taxBreakdown?.subtotal) {
+        return parseFloat(taxBreakdown.subtotal.amount || 0);
+      }
+      return 0;
+    }
+    const detail = taxBreakdown.detailedBreakdowns.find((d) => d.subtype === subtype);
+    return detail?.value ? parseFloat(detail.value.amount || 0) : 0;
   },
 
   /**
