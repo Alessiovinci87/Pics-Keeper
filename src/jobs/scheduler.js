@@ -14,7 +14,9 @@ const utc = require('dayjs/plugin/utc');
 dayjs.extend(utc);
 
 // Delay between marketplace syncs to respect API rate limits (ms)
-const MARKETPLACE_SYNC_DELAY = 4000;
+// searchOrders v2026 has burst=20, restore=0.0056 req/s (~180s per token)
+// 30s lets ~0.17 tokens restore; main protection is the 429 retry handler
+const MARKETPLACE_SYNC_DELAY = 30000;
 
 // Max time for a single marketplace sync before aborting (5 minutes)
 const PER_MARKETPLACE_TIMEOUT = 5 * 60 * 1000;

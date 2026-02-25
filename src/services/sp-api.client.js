@@ -97,26 +97,36 @@ class SpApiClient {
         return response.data.payload || response.data;
       } catch (err) {
         const status = err.response?.status;
-        const retryAfterHeader = err.response?.headers?.['x-amzn-ratelimit-limit']
-          || err.response?.headers?.['retry-after'];
 
-        // Rate limited (429) - wait and retry
+        // Rate limited (429) - calculate proper wait from rate limit header
         if (status === 429) {
-          const retryDelay = retryAfterHeader
-            ? Math.max(parseInt(retryAfterHeader, 10) * 1000, baseDelay)
-            : baseDelay * Math.pow(2, attempt - 1);
-          const cappedDelay = Math.min(retryDelay, 60000);
+          // x-amzn-RateLimit-Limit = requests per second (e.g. 0.0056 for searchOrders)
+          const rateLimitHeader = err.response?.headers?.['x-amzn-ratelimit-limit'];
+          let retryDelay;
 
-          logger.warn(`SP-API rate limited (429) on ${path}, attempt ${attempt}/${maxRetries}, waiting ${cappedDelay}ms`, {
-            path,
-            attempt,
-          });
+          if (rateLimitHeader) {
+            const ratePerSecond = parseFloat(rateLimitHeader);
+            // Wait = 1/rate = time to restore 1 token (e.g. 1/0.0056 = ~179s)
+            retryDelay = ratePerSecond > 0 ? Math.ceil(1 / ratePerSecond) * 1000 : 180000;
+          } else {
+            // No header: use exponential backoff
+            retryDelay = baseDelay * Math.pow(2, attempt - 1);
+          }
+
+          // Cap between 3s and 180s
+          retryDelay = Math.max(baseDelay, Math.min(retryDelay, 180000));
 
           if (attempt === maxRetries) {
             throw new ExternalApiError(`SP-API rate limited after ${maxRetries} attempts: ${path}`);
           }
 
-          await sleep(cappedDelay);
+          logger.info(`SP-API rate limited (429) on ${path}, waiting ${Math.round(retryDelay / 1000)}s for token restore (attempt ${attempt}/${maxRetries})`, {
+            path,
+            attempt,
+            waitSeconds: Math.round(retryDelay / 1000),
+          });
+
+          await sleep(retryDelay);
           continue;
         }
 
