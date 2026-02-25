@@ -41,6 +41,27 @@ const REFERRAL_FEE_TYPES = [
 ];
 
 /**
+ * Marketplace timezone map (no DB migration needed).
+ * Used for timezone-aware date boundaries and order_date grouping
+ * to match Amazon Business Report logic.
+ */
+const MARKETPLACE_TIMEZONES = {
+  DE: 'Europe/Berlin',
+  FR: 'Europe/Paris',
+  IT: 'Europe/Rome',
+  ES: 'Europe/Madrid',
+  GB: 'Europe/London',
+  NL: 'Europe/Amsterdam',
+  SE: 'Europe/Stockholm',
+  PL: 'Europe/Warsaw',
+  TR: 'Europe/Istanbul',
+  BE: 'Europe/Brussels',
+  US: 'America/Los_Angeles',
+  CA: 'America/Toronto',
+};
+
+
+/**
  * Profit Engine - computes net profit for each order line.
  *
  * Formula per order line (GROSS revenue, aligned with ShopKeeper):
@@ -68,32 +89,45 @@ const ProfitService = {
     let processed = 0;
 
     try {
-      logger.info('Starting profit computation', { accountId, marketplaceId, dateFrom, dateTo });
+            logger.info('Starting profit computation', { accountId, marketplaceId, dateFrom, dateTo });
+
+      // Resolve marketplace timezone for date boundaries and grouping
+      const mpResult = await db.query(
+        'SELECT country_code FROM marketplaces WHERE id = $1',
+        [marketplaceId]
+      );
+      const tz = MARKETPLACE_TIMEZONES[mpResult.rows[0]?.country_code] || 'UTC';
 
       // Step 1: Cleanup cancelled orders from order_profit
       await this.cleanupCancelledOrders(accountId, marketplaceId);
 
-      // Step 2: Get all non-cancelled, non-pending orders in range
+      // Step 2: Get all non-cancelled orders in range (timezone-aware boundaries)
       const ordersResult = await db.query(
-        `SELECT * FROM orders_raw
+        `SELECT *, (purchase_date AT TIME ZONE $5)::date::text AS local_date
+         FROM orders_raw
          WHERE account_id = $1 AND marketplace_id = $2
-           AND purchase_date >= $3 AND purchase_date < $4
-           AND order_status NOT IN ('Cancelled', 'Pending')
+           AND (purchase_date AT TIME ZONE $5)::date >= $3::date
+           AND (purchase_date AT TIME ZONE $5)::date < $4::date
+           AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
          ORDER BY purchase_date`,
-        [accountId, marketplaceId, dateFrom, dateTo]
+        [accountId, marketplaceId, dateFrom, dateTo, tz]
       );
 
-      // Pre-fetch financial events for all orders in range (fees only, not revenue charges)
-      const feeMap = await this.buildFeeMap(accountId, marketplaceId, dateFrom, dateTo);
+      // Pre-fetch financial events (widen by 1 day each side for boundary orders)
+      const dayjs = require('dayjs');
+      const feeFrom = dayjs.utc(dateFrom).subtract(1, 'day').format('YYYY-MM-DD');
+      const feeTo = dayjs.utc(dateTo).add(1, 'day').format('YYYY-MM-DD');
+      const feeMap = await this.buildFeeMap(accountId, marketplaceId, feeFrom, feeTo);
 
       // Pre-fetch ASIN costs
       const costsMap = await this.buildCostsMap(accountId, marketplaceId);
 
-      // Pre-fetch units sold per ASIN per day (for ads allocation)
-      const unitsByDay = await this.buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo);
+      // Pre-fetch units sold per ASIN per day (for ads allocation, timezone-aware)
+      const unitsByDay = await this.buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo, tz);
 
-      // Pre-fetch storage allocation data (units sold per ASIN this month)
-      const storageMap = await this.buildStorageMap(accountId, marketplaceId, dateFrom, dateTo);
+      // Pre-fetch storage allocation data (units sold per ASIN this month, timezone-aware)
+      const storageMap = await this.buildStorageMap(accountId, marketplaceId, dateFrom, dateTo, tz);
+
 
       for (const order of ordersResult.rows) {
         await this.computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap);
@@ -125,7 +159,7 @@ const ProfitService = {
        WHERE op.account_id = o.account_id
          AND op.amazon_order_id = o.amazon_order_id
          AND op.asin = o.asin
-         AND o.order_status = 'Cancelled'
+         AND UPPER(o.order_status) IN ('CANCELLED', 'CANCELED')
          AND op.account_id = $1
          AND op.marketplace_id = $2`,
       [accountId, marketplaceId]
@@ -194,16 +228,18 @@ const ProfitService = {
   /**
    * Build map of units sold per ASIN per day (for ads allocation).
    */
-  async buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo) {
+  async buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo, tz) {
     const result = await db.query(
-      `SELECT asin, purchase_date::date AS order_date, SUM(quantity) AS units
+      `SELECT asin, (purchase_date AT TIME ZONE $5)::date AS order_date, SUM(quantity) AS units
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
-         AND purchase_date >= $3 AND purchase_date < $4
-         AND order_status NOT IN ('Cancelled', 'Pending')
-       GROUP BY asin, purchase_date::date`,
-      [accountId, marketplaceId, dateFrom, dateTo]
+         AND (purchase_date AT TIME ZONE $5)::date >= $3::date
+         AND (purchase_date AT TIME ZONE $5)::date < $4::date
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
+       GROUP BY asin, (purchase_date AT TIME ZONE $5)::date`,
+      [accountId, marketplaceId, dateFrom, dateTo, tz]
     );
+
 
     const map = {};
     for (const row of result.rows) {
@@ -216,19 +252,20 @@ const ProfitService = {
   /**
    * Build storage allocation map: asin -> units_sold_this_month.
    */
-  async buildStorageMap(accountId, marketplaceId, dateFrom, dateTo) {
+  async buildStorageMap(accountId, marketplaceId, dateFrom, dateTo, tz) {
     const result = await db.query(
       `SELECT asin,
-        DATE_TRUNC('month', purchase_date) AS month,
+        DATE_TRUNC('month', (purchase_date AT TIME ZONE $5)::date) AS month,
         SUM(quantity) AS units_month
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
-         AND purchase_date >= DATE_TRUNC('month', $3::date)
-         AND purchase_date < DATE_TRUNC('month', $4::date) + INTERVAL '1 month'
-         AND order_status NOT IN ('Cancelled', 'Pending')
-       GROUP BY asin, DATE_TRUNC('month', purchase_date)`,
-      [accountId, marketplaceId, dateFrom, dateTo]
+         AND (purchase_date AT TIME ZONE $5)::date >= DATE_TRUNC('month', $3::date)
+         AND (purchase_date AT TIME ZONE $5)::date < DATE_TRUNC('month', $4::date) + INTERVAL '1 month'
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
+       GROUP BY asin, DATE_TRUNC('month', (purchase_date AT TIME ZONE $5)::date)`,
+      [accountId, marketplaceId, dateFrom, dateTo, tz]
     );
+
 
     const map = {};
     for (const row of result.rows) {
@@ -246,7 +283,8 @@ const ProfitService = {
    *   item_price + item_tax + shipping_price + shipping_tax - promotion_discount
    */
   async computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap) {
-    const orderDate = toDateStr(order.purchase_date);
+    // Use local_date from SQL (marketplace timezone) instead of UTC conversion
+    const orderDate = order.local_date || toDateStr(order.purchase_date);
     const feeKey = `${order.amazon_order_id}:${order.asin}`;
     // Try exact key first, then fallback key (for ASIN-unresolved fees)
     const fees = feeMap[feeKey] || feeMap[`${order.amazon_order_id}:__fallback__`] || {};

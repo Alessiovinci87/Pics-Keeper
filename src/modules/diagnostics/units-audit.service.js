@@ -87,7 +87,7 @@ const UnitsAuditService = {
        WHERE account_id = $1 AND marketplace_id = $2
          AND (purchase_date AT TIME ZONE $5)::date >= $3::date
          AND (purchase_date AT TIME ZONE $5)::date < $4::date
-         AND order_status != 'Cancelled'
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
          ${asinFilter}`,
       params
     );
@@ -116,7 +116,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND order_status NOT IN ('Cancelled', 'Pending')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
          ${asinFilter}`,
       params
     );
@@ -196,7 +196,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND order_status = 'Cancelled'
+         AND UPPER(order_status) IN ('CANCELLED', 'CANCELED')
          ${asinFilter}`,
       params
     );
@@ -222,7 +222,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND order_status = 'Pending'
+         AND UPPER(order_status) = 'PENDING'
          ${asinFilter}`,
       params
     );
@@ -268,7 +268,7 @@ const UnitsAuditService = {
        FROM orders_raw o
        WHERE o.account_id = $1 AND o.marketplace_id = $2
          AND o.purchase_date >= $3 AND o.purchase_date < $4
-         AND o.order_status NOT IN ('Cancelled', 'Pending')
+         AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
          ${asinFilter}
          AND NOT EXISTS (
            SELECT 1 FROM order_profit op
@@ -291,7 +291,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND order_status NOT IN ('Cancelled', 'Pending')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
          AND purchase_date::date != (purchase_date AT TIME ZONE $5)::date`,
       [accountId, marketplaceId, dateFrom, dateTo, tz]
     );
@@ -317,7 +317,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND order_status NOT IN ('Cancelled', 'Pending')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
        ORDER BY purchase_date`,
       [accountId, marketplaceId, date, nextDateStr, tz]
     );
@@ -404,8 +404,8 @@ const UnitsAuditService = {
       orderProfit: profit.rows,
       dailyMetrics: metrics.rows,
       summary: {
-        totalOrders: orders.rows.filter(o => o.order_status !== 'Cancelled').length,
-        totalUnits: orders.rows.filter(o => o.order_status !== 'Cancelled').reduce((s, r) => s + r.quantity, 0),
+        totalOrders: orders.rows.filter(o => !['CANCELLED', 'CANCELED'].includes((o.order_status || '').toUpperCase())).length,
+        totalUnits: orders.rows.filter(o => !['CANCELLED', 'CANCELED'].includes((o.order_status || '').toUpperCase())).reduce((s, r) => s + r.quantity, 0),
         totalRevenue: profit.rows.reduce((s, r) => s + parseFloat(r.revenue), 0),
         totalProfit: profit.rows.reduce((s, r) => s + parseFloat(r.net_profit), 0),
         totalFees: profit.rows.reduce((s, r) => s + parseFloat(r.referral_fee) + parseFloat(r.fba_fee) + parseFloat(r.other_amazon_fees), 0),
