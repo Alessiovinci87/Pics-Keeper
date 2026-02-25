@@ -8,10 +8,11 @@ const SyncLogger = require('../../services/sync-logger');
  * Profit Engine - computes net profit for each order line.
  *
  * Formula per order line:
- *   Revenue (item_price + shipping_price - promotion_discount)
+ *   Revenue (item_price + item_tax + shipping_price + shipping_tax - promotion_discount)
+ *   Revenue is GROSS (including VAT) to match Sellerboard/external tools.
  *   - Referral Fee
  *   - FBA Fee
- *   - Other Amazon Fees
+ *   - Other Amazon Fees (includes MarketplaceFacilitatorTax to offset VAT in revenue)
  *   - Refund Amount (allocated to refund event date)
  *   - Ads Allocated (ads_spend_day / units_sold_day * quantity)
  *   - Product Cost (per marketplace)
@@ -53,11 +54,43 @@ const ProfitService = {
       // Pre-fetch ASIN costs
       const costsMap = await this.buildCostsMap(accountId, marketplaceId);
 
+      // Diagnostic: warn if no product costs configured (profit will be overstated)
+      if (Object.keys(costsMap).length === 0 && ordersResult.rows.length > 0) {
+        logger.warn('No product costs configured for this marketplace — profit will be overstated', {
+          accountId, marketplaceId,
+          hint: 'Configure costs via POST /api/asin-costs or the Costi Prodotto page',
+        });
+      }
+
       // Pre-fetch units sold per ASIN per day (for ads allocation)
       const unitsByDay = await this.buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo);
 
       // Pre-fetch storage allocation data (units sold per ASIN this month)
       const storageMap = await this.buildStorageMap(accountId, marketplaceId, dateFrom, dateTo);
+
+      // Diagnostic: warn if no ads data exists (PPC will show as 0)
+      if (ordersResult.rows.length > 0) {
+        const adsCheck = await db.query(
+          `SELECT COUNT(*) FROM ads_daily_spend
+           WHERE account_id = $1 AND marketplace_id = $2
+             AND spend_date >= $3 AND spend_date < $4`,
+          [accountId, marketplaceId, dateFrom, dateTo]
+        );
+        if (parseInt(adsCheck.rows[0].count, 10) === 0) {
+          logger.warn('No ads data found for this marketplace+period — PPC will show as 0', {
+            accountId, marketplaceId, dateFrom, dateTo,
+            hint: 'Ensure ads_profile_ids are configured in the account and ads sync has run',
+          });
+        }
+      }
+
+      // Diagnostic: warn if no financial events exist (fees will be 0)
+      if (orderIds.length > 0 && Object.keys(feeMap).length === 0) {
+        logger.warn('No financial events found for any orders — Amazon fees will be 0', {
+          accountId, marketplaceId, ordersCount: orderIds.length,
+          hint: 'Financial events sync may not have completed yet',
+        });
+      }
 
       for (const order of ordersResult.rows) {
         await this.computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap);
@@ -200,10 +233,14 @@ const ProfitService = {
     const costs = costsMap[order.asin] || {};
     const qty = order.quantity || 1;
 
-    // Revenue = item_price + shipping_price - promotion_discount
+    // Revenue = item_price + item_tax + shipping_price + shipping_tax - promotion_discount
+    // Uses GROSS revenue (including VAT) to match Sellerboard and other tools.
+    // VAT is offset by MarketplaceFacilitatorTax in the fee deductions below.
     const revenue = round(
       parseFloat(order.item_price || 0) +
-      parseFloat(order.shipping_price || 0) -
+      parseFloat(order.item_tax || 0) +
+      parseFloat(order.shipping_price || 0) +
+      parseFloat(order.shipping_tax || 0) -
       parseFloat(order.promotion_discount || 0)
     , 4);
 
@@ -234,7 +271,8 @@ const ProfitService = {
     for (const [feeType, amount] of Object.entries(fees)) {
       if (knownFeeTypes.includes(feeType)) continue;
       if (revenueChargeTypes.includes(feeType)) continue;
-      if (feeType.startsWith('MarketplaceFacilitator')) continue;
+      // MarketplaceFacilitatorTax is now INCLUDED as a fee to offset the VAT
+      // added to gross revenue. This keeps profit correct while showing gross revenue.
       // Safety net: only count negative amounts (actual fee deductions by Amazon)
       if (amount < 0) {
         otherFees += Math.abs(amount);
@@ -290,6 +328,7 @@ const ProfitService = {
         referral_fee = EXCLUDED.referral_fee,
         fba_fee = EXCLUDED.fba_fee,
         other_amazon_fees = EXCLUDED.other_amazon_fees,
+        refund_amount = EXCLUDED.refund_amount,
         ads_allocated = EXCLUDED.ads_allocated,
         product_cost = EXCLUDED.product_cost,
         inbound_cost = EXCLUDED.inbound_cost,
@@ -360,6 +399,8 @@ const ProfitService = {
       [accountId, marketplaceId, dateFrom, dateTo]
     );
 
+    let applied = 0;
+
     for (const refund of refunds.rows) {
       if (!refund.amazon_order_id) continue;
 
@@ -368,26 +409,54 @@ const ProfitService = {
       // Update the order_profit record with refund amount, then recalculate totals.
       // Refund reduces revenue (not a cost increase), so:
       //   net_profit = revenue - refund_amount - total_costs
-      await db.query(
-        `UPDATE order_profit SET
-          refund_amount = $1,
-          net_profit = revenue - $1 - total_costs,
-          margin_pct = CASE WHEN revenue > 0
-            THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / revenue) * 100, 4), -9999), 9999)
-            ELSE 0 END,
-          roi_pct = CASE WHEN (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated) > 0
-            THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4), -9999), 9999)
-            ELSE 0 END,
-          computed_at = NOW()
-        WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,
-        [refundAmount, accountId, refund.amazon_order_id, refund.asin]
-      );
+      let result;
+      if (refund.asin) {
+        // Exact match by order_id + asin
+        result = await db.query(
+          `UPDATE order_profit SET
+            refund_amount = $1,
+            net_profit = revenue - $1 - total_costs,
+            margin_pct = CASE WHEN revenue > 0
+              THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / revenue) * 100, 4), -9999), 9999)
+              ELSE 0 END,
+            roi_pct = CASE WHEN (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated) > 0
+              THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4), -9999), 9999)
+              ELSE 0 END,
+            computed_at = NOW()
+          WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,
+          [refundAmount, accountId, refund.amazon_order_id, refund.asin]
+        );
+      } else {
+        // NULL asin (SKU resolution failed) — apply to the highest-revenue line item
+        // of that order so the refund isn't lost entirely
+        result = await db.query(
+          `UPDATE order_profit SET
+            refund_amount = $1,
+            net_profit = revenue - $1 - total_costs,
+            margin_pct = CASE WHEN revenue > 0
+              THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / revenue) * 100, 4), -9999), 9999)
+              ELSE 0 END,
+            roi_pct = CASE WHEN (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated) > 0
+              THEN LEAST(GREATEST(ROUND(((revenue - $1 - total_costs) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4), -9999), 9999)
+              ELSE 0 END,
+            computed_at = NOW()
+          WHERE ctid = (
+            SELECT ctid FROM order_profit
+            WHERE account_id = $2 AND amazon_order_id = $3
+            ORDER BY revenue DESC LIMIT 1
+          )`,
+          [refundAmount, accountId, refund.amazon_order_id]
+        );
+      }
+
+      if (result.rowCount > 0) applied++;
     }
 
     logger.info('Refunds processed', {
       accountId,
       marketplaceId,
       refundsCount: refunds.rows.length,
+      applied,
     });
   },
 

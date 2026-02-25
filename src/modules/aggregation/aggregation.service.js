@@ -150,10 +150,10 @@ const AggregationService = {
       GROUP BY ads.account_id, ads.marketplace_id, ads.asin, ads.spend_date, ads.currency
       ON CONFLICT (account_id, marketplace_id, asin, metric_date) DO UPDATE SET
         ads_spend = EXCLUDED.ads_spend,
-        net_profit = asin_daily_metrics.revenue - asin_daily_metrics.total_amazon_fees
-                     - asin_daily_metrics.refunds - EXCLUDED.ads_spend
-                     - asin_daily_metrics.total_product_costs,
         acos_pct = EXCLUDED.acos_pct,
+        tacos_pct = CASE WHEN asin_daily_metrics.revenue > 0
+          THEN LEAST(ROUND((EXCLUDED.ads_spend / asin_daily_metrics.revenue) * 100, 4), 9999)
+          ELSE 0 END,
         computed_at = NOW()`,
       [accountId, marketplaceId, dateFrom, dateTo]
     );
