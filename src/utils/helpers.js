@@ -50,9 +50,10 @@ function toDateStr(dateInput) {
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
   const now = dayjs.utc();
   const from = now.subtract(maxDaysBack, 'day').startOf('day');
+  const to = now.subtract(3, 'minute'); // SP-API requires createdBefore >= 2 min before now
   return {
     from: from.toISOString(),
-    to: now.toISOString(),
+    to: to.toISOString(),
   };
 }
 
