@@ -28,16 +28,35 @@ class AdsApiClient {
       return this.accessToken;
     }
 
-    const response = await retry(
-      () =>
-        axios.post('https://api.amazon.com/auth/o2/token', {
-          grant_type: 'refresh_token',
-          refresh_token: this.target.ads_api_refresh_token,
-          client_id: config.adsApi.clientId,
-          client_secret: config.adsApi.clientSecret,
-        }),
-      { maxRetries: 3, baseDelay: 2000, label: 'Ads API token' }
-    );
+    if (!this.target.ads_api_refresh_token) {
+      throw new Error('ads_api_refresh_token is empty or not set in the account record');
+    }
+    if (!config.adsApi.clientId || !config.adsApi.clientSecret) {
+      throw new Error('ADS_API_CLIENT_ID or ADS_API_CLIENT_SECRET is empty in .env');
+    }
+
+    let response;
+    try {
+      response = await retry(
+        () =>
+          axios.post('https://api.amazon.com/auth/o2/token', {
+            grant_type: 'refresh_token',
+            refresh_token: this.target.ads_api_refresh_token,
+            client_id: config.adsApi.clientId,
+            client_secret: config.adsApi.clientSecret,
+          }),
+        { maxRetries: 3, baseDelay: 2000, label: 'Ads API token' }
+      );
+    } catch (err) {
+      const body = err.response?.data;
+      logger.error('Ads API token request failed - full details', {
+        status: err.response?.status,
+        responseBody: JSON.stringify(body),
+        refreshTokenPrefix: this.target.ads_api_refresh_token?.substring(0, 10) + '...',
+        clientIdPrefix: config.adsApi.clientId?.substring(0, 10) + '...',
+      });
+      throw err;
+    }
 
     this.accessToken = response.data.access_token;
     this.tokenExpiresAt = Date.now() + response.data.expires_in * 1000;
