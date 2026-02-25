@@ -3,6 +3,11 @@ const scheduler = require('../jobs/scheduler');
 const SyncLogger = require('../services/sync-logger');
 const validate = require('../middleware/validate');
 const db = require('../database/pool');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const router = Router();
 
@@ -37,6 +42,78 @@ router.post('/trigger/:jobType', async (req, res, next) => {
     });
 
     res.json({ message: `Job ${req.params.jobType} triggered` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/sync/trigger/compute-range
+ * Trigger profit computation + aggregation for a CUSTOM date range.
+ * Use this when the default 30-day window doesn't cover your test period.
+ * Body: { accountId, dateFrom, dateTo }
+ */
+router.post('/trigger/compute-range', async (req, res, next) => {
+  try {
+    const { accountId, dateFrom, dateTo } = req.body;
+    if (!accountId || !dateFrom || !dateTo) {
+      return res.status(400).json({
+        error: { message: 'accountId, dateFrom, dateTo are required (YYYY-MM-DD)' },
+      });
+    }
+
+    const AccountService = require('../modules/accounts/account.service');
+    const ProfitService = require('../modules/profit-engine/profit.service');
+    const AggregationService = require('../modules/aggregation/aggregation.service');
+    const logger = require('../utils/logger');
+
+    const targets = await AccountService.getActiveSyncTargets();
+    const accountTargets = targets.filter(t => t.account_id === parseInt(accountId, 10));
+
+    if (accountTargets.length === 0) {
+      return res.status(404).json({ error: { message: 'No active marketplaces for this account' } });
+    }
+
+    // dateTo for compute uses exclusive end, add 1 day
+    const computeDateTo = dayjs.utc(dateTo).add(1, 'day').format('YYYY-MM-DD');
+
+    // Run async
+    const seen = new Set();
+    const runCompute = async () => {
+      for (const target of accountTargets) {
+        const key = `${target.account_id}:${target.account_marketplace_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        try {
+          logger.info(`compute-range: processing ${target.country_code}`, {
+            accountId: target.account_id,
+            dateFrom,
+            dateTo: computeDateTo,
+          });
+          await ProfitService.computeForRange(
+            target.account_id, target.account_marketplace_id, dateFrom, computeDateTo
+          );
+          await AggregationService.aggregate(
+            target.account_id, target.account_marketplace_id, dateFrom, computeDateTo
+          );
+          logger.info(`compute-range: ${target.country_code} completed`);
+        } catch (err) {
+          logger.error(`compute-range: ${target.country_code} failed`, { error: err.message });
+        }
+      }
+      logger.info('compute-range: all marketplaces done');
+    };
+
+    runCompute().catch((err) => {
+      logger.error('compute-range job failed', { error: err.message });
+    });
+
+    res.json({
+      message: `Compute+aggregate triggered for ${accountTargets.length} marketplace(s)`,
+      dateRange: { from: dateFrom, to: dateTo },
+      marketplaces: accountTargets.map(t => t.country_code),
+    });
   } catch (err) {
     next(err);
   }
@@ -145,12 +222,12 @@ router.get('/diagnose', validate({ query: ['accountId'] }), async (req, res, nex
     }
 
     const [rawResult, rawByMp, profitResult, metricsResult, cancelledResult, dateRangeResult, dailyBreakdownResult] = await Promise.all([
-      // Total units from orders_raw (excluding cancelled/pending)
+      // Total units from orders_raw (excluding cancelled — case-insensitive)
       db.query(
         `SELECT COUNT(*) AS order_lines, SUM(quantity) AS total_units
          FROM orders_raw
          WHERE ${dateConditionsOrders.join(' AND ')}
-           AND order_status NOT IN ('Cancelled', 'Pending')`,
+           AND LOWER(order_status) NOT LIKE '%cancel%'`,
         paramsOrders
       ),
       // Per-marketplace breakdown from orders_raw
@@ -181,14 +258,14 @@ router.get('/diagnose', validate({ query: ['accountId'] }), async (req, res, nex
          ORDER BY SUM(adm.units_sold) DESC`,
         paramsMetrics
       ),
-      // Cancelled/Pending orders still in order_profit
+      // Cancelled orders still in order_profit
       db.query(
         `SELECT COUNT(*) AS orphan_records, SUM(op.quantity) AS orphan_units
          FROM order_profit op
          JOIN orders_raw o ON o.account_id = op.account_id
            AND o.amazon_order_id = op.amazon_order_id AND o.asin = op.asin
          WHERE op.account_id = $1
-           AND o.order_status IN ('Cancelled', 'Pending')`,
+           AND LOWER(o.order_status) LIKE '%cancel%'`,
         [accountId]
       ),
       // Date range of orders in DB
@@ -197,16 +274,16 @@ router.get('/diagnose', validate({ query: ['accountId'] }), async (req, res, nex
                 COUNT(DISTINCT purchase_date::date) AS days_with_orders
          FROM orders_raw
          WHERE ${dateConditionsOrders.join(' AND ')}
-           AND order_status NOT IN ('Cancelled', 'Pending')`,
+           AND LOWER(order_status) NOT LIKE '%cancel%'`,
         paramsOrders
       ),
-      // Per-day breakdown (top marketplace by units)
+      // Per-day breakdown
       db.query(
         `SELECT purchase_date::date AS order_date,
                 COUNT(*) AS order_lines, SUM(quantity) AS total_units
          FROM orders_raw
          WHERE ${dateConditionsOrders.join(' AND ')}
-           AND order_status NOT IN ('Cancelled', 'Pending')
+           AND LOWER(order_status) NOT LIKE '%cancel%'
          GROUP BY purchase_date::date
          ORDER BY purchase_date::date`,
         paramsOrders
@@ -226,7 +303,7 @@ router.get('/diagnose', validate({ query: ['accountId'] }), async (req, res, nex
       orders_raw: {
         order_lines: parseInt(rawResult.rows[0].order_lines, 10),
         total_units: parseInt(rawResult.rows[0].total_units || 0, 10),
-        note: 'Excludes Cancelled/Pending',
+        note: 'Excludes Canceled (case-insensitive)',
       },
       orders_raw_by_marketplace: rawByMp.rows,
       order_profit: {
@@ -247,7 +324,7 @@ router.get('/diagnose', validate({ query: ['accountId'] }), async (req, res, nex
       orphan_cancelled_in_profit: {
         records: parseInt(cancelledResult.rows[0].orphan_records, 10),
         units: parseInt(cancelledResult.rows[0].orphan_units || 0, 10),
-        note: 'order_profit records whose orders are now Cancelled/Pending',
+        note: 'order_profit records whose orders are now Cancelled',
       },
     });
   } catch (err) {
@@ -256,10 +333,116 @@ router.get('/diagnose', validate({ query: ['accountId'] }), async (req, res, nex
 });
 
 /**
+ * GET /api/sync/audit-units
+ * Strict-mode unit audit: compare our system with Seller Central logic.
+ * This is the primary diagnostic tool for unit count discrepancies.
+ *
+ * Query params:
+ *   accountId (required)
+ *   dateFrom (required, YYYY-MM-DD, marketplace local date)
+ *   dateTo (required, YYYY-MM-DD, marketplace local date)
+ *   marketplaceId (optional, internal ID)
+ *   countryCode (optional, e.g. 'IT' — for timezone; defaults to 'IT')
+ *   asin (optional, filter single ASIN)
+ */
+router.get('/audit-units', validate({ query: ['accountId', 'dateFrom', 'dateTo'] }), async (req, res, next) => {
+  try {
+    const UnitsAuditService = require('../modules/diagnostics/units-audit.service');
+
+    const result = await UnitsAuditService.auditUnitsFromDB({
+      accountId: parseInt(req.query.accountId, 10),
+      marketplaceId: req.query.marketplaceId ? parseInt(req.query.marketplaceId, 10) : null,
+      countryCode: req.query.countryCode || null,
+      dateFrom: req.query.dateFrom,
+      dateTo: req.query.dateTo,
+      asin: req.query.asin || null,
+    });
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/sync/audit-units-live
+ * Live SP-API unit count for a single marketplace.
+ * WARNING: Slow! Calls SP-API directly with full pagination.
+ *
+ * Query params:
+ *   accountId (required)
+ *   marketplaceId (required, internal ID)
+ *   dateFrom (required, YYYY-MM-DD)
+ *   dateTo (required, YYYY-MM-DD)
+ */
+router.get('/audit-units-live', validate({ query: ['accountId', 'marketplaceId', 'dateFrom', 'dateTo'] }), async (req, res, next) => {
+  try {
+    const AccountService = require('../modules/accounts/account.service');
+    const UnitsAuditService = require('../modules/diagnostics/units-audit.service');
+
+    const accountId = parseInt(req.query.accountId, 10);
+    const marketplaceId = parseInt(req.query.marketplaceId, 10);
+
+    const targets = await AccountService.getActiveSyncTargets();
+    const target = targets.find(t => t.account_id === accountId && t.account_marketplace_id === marketplaceId);
+    if (!target) {
+      return res.status(404).json({ error: { message: 'Account+marketplace combination not found' } });
+    }
+
+    const result = await UnitsAuditService.auditUnitsFromAPI(
+      target,
+      req.query.dateFrom,
+      req.query.dateTo
+    );
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/sync/precision-test
+ * Single-day, single-marketplace precision test.
+ * Compares SP-API live data with DB for exact order-by-order matching.
+ *
+ * Query params:
+ *   accountId (required)
+ *   marketplaceId (required, internal ID)
+ *   date (required, YYYY-MM-DD)
+ *   asin (optional)
+ */
+router.get('/precision-test', validate({ query: ['accountId', 'marketplaceId', 'date'] }), async (req, res, next) => {
+  try {
+    const AccountService = require('../modules/accounts/account.service');
+    const UnitsAuditService = require('../modules/diagnostics/units-audit.service');
+
+    const accountId = parseInt(req.query.accountId, 10);
+    const marketplaceId = parseInt(req.query.marketplaceId, 10);
+
+    const targets = await AccountService.getActiveSyncTargets();
+    const target = targets.find(t => t.account_id === accountId && t.account_marketplace_id === marketplaceId);
+    if (!target) {
+      return res.status(404).json({ error: { message: 'Account+marketplace combination not found' } });
+    }
+
+    const result = await UnitsAuditService.precisionTest(
+      target,
+      req.query.date,
+      req.query.asin || null
+    );
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * GET /api/sync/count-orders
- * Dry-run: call SP-API getOrders and count results WITHOUT syncing.
+ * Dry-run: call SP-API searchOrders and count results WITHOUT syncing.
  * Compares SP-API order count with what's in our DB.
- * Query params: accountId, marketplaceId (internal ID, e.g. 3 for IT), dateFrom, dateTo
+ * Query params: accountId, marketplaceId (internal ID), dateFrom?, dateTo?
  */
 router.get('/count-orders', validate({ query: ['accountId', 'marketplaceId'] }), async (req, res, next) => {
   try {
@@ -282,9 +465,6 @@ router.get('/count-orders', validate({ query: ['accountId', 'marketplaceId'] }),
     const spApi = new SpApiClient(target);
 
     // Build date range
-    const dayjs = require('dayjs');
-    const utc = require('dayjs/plugin/utc');
-    dayjs.extend(utc);
     const from = dateFrom
       ? dayjs.utc(dateFrom).format('YYYY-MM-DDTHH:mm:ss[Z]')
       : dayjs.utc().subtract(30, 'day').format('YYYY-MM-DDTHH:mm:ss[Z]');
@@ -292,24 +472,35 @@ router.get('/count-orders', validate({ query: ['accountId', 'marketplaceId'] }),
       ? dayjs.utc(dateTo).endOf('day').format('YYYY-MM-DDTHH:mm:ss[Z]')
       : dayjs.utc().subtract(2, 'minute').format('YYYY-MM-DDTHH:mm:ss[Z]');
 
-    // Paginate through ALL orders and count them
-    let nextToken = null;
+    // Paginate through ALL orders using searchOrders (v2026-01-01)
+    let paginationToken = null;
     let totalOrders = 0;
+    let totalItems = 0;
+    let totalQuantity = 0;
     let pages = 0;
 
     do {
-      const response = await spApi.getOrders({
-        MarketplaceIds: [target.amazon_marketplace_id],
-        CreatedAfter: from,
-        CreatedBefore: to,
-        NextToken: nextToken,
+      const response = await spApi.searchOrders({
+        marketplaceIds: [target.amazon_marketplace_id],
+        createdAfter: from,
+        createdBefore: to,
+        paginationToken,
       });
 
-      const orders = response.Orders || [];
+      const orders = response.orders || [];
       totalOrders += orders.length;
       pages++;
-      nextToken = response.NextToken || null;
-    } while (nextToken);
+
+      for (const order of orders) {
+        const items = order.orderItems || [];
+        totalItems += items.length;
+        for (const item of items) {
+          totalQuantity += item.quantityOrdered || 1;
+        }
+      }
+
+      paginationToken = response.pagination?.nextToken || null;
+    } while (paginationToken);
 
     // Compare with our DB
     const dbConditions = ['account_id = $1', 'marketplace_id = $2'];
@@ -341,10 +532,12 @@ router.get('/count-orders', validate({ query: ['accountId', 'marketplaceId'] }),
     res.json({
       sp_api: {
         total_orders: totalOrders,
+        total_items: totalItems,
+        total_quantity: totalQuantity,
         pages_fetched: pages,
         date_range: { from, to },
         marketplace: target.country_code,
-        note: 'Total orders from SP-API (all ASINs, all statuses)',
+        note: 'Total from SP-API searchOrders v2026 (all statuses, SUM quantityOrdered)',
       },
       db: {
         distinct_orders: parseInt(dbResult.rows[0].db_orders, 10),
@@ -352,7 +545,8 @@ router.get('/count-orders', validate({ query: ['accountId', 'marketplaceId'] }),
         total_units: parseInt(dbResult.rows[0].db_units || 0, 10),
         note: asin ? `Filtered by ASIN ${asin}` : 'All ASINs (all statuses)',
       },
-      gap: totalOrders - parseInt(dbResult.rows[0].db_orders, 10),
+      gap_orders: totalOrders - parseInt(dbResult.rows[0].db_orders, 10),
+      gap_units: totalQuantity - parseInt(dbResult.rows[0].db_units || 0, 10),
     });
   } catch (err) {
     next(err);
