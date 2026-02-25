@@ -5,14 +5,51 @@ const AdsService = require('../ads/ads.service');
 const SyncLogger = require('../../services/sync-logger');
 
 /**
+ * Revenue charge types from ItemChargeList in ShipmentEvent.
+ * These are NOT fees — they are revenue components.
+ * buildFeeMap must EXCLUDE these from fee calculations.
+ */
+const REVENUE_CHARGE_TYPES = [
+  'Principal',
+  'Tax',
+  'ShippingCharge',
+  'ShippingTax',
+  'GiftWrap',
+  'GiftWrapTax',
+  'RestockingFee',
+  'Goodwill',
+  'ExportCharge',
+  'CODItemCharge',
+  'CODOrderCharge',
+];
+
+/**
+ * Known FBA fee types (for grouping).
+ */
+const FBA_FEE_TYPES = [
+  'FBAPerUnitFulfillmentFee',
+  'FBAPerOrderFulfillmentFee',
+  'FBAWeightBasedFee',
+];
+
+/**
+ * Known referral fee types.
+ */
+const REFERRAL_FEE_TYPES = [
+  'Commission',
+  'ReferralFee',
+];
+
+/**
  * Profit Engine - computes net profit for each order line.
  *
- * Formula per order line:
- *   Revenue (item_price + shipping_price - promotion_discount)
- *   - Referral Fee
+ * Formula per order line (GROSS revenue, aligned with ShopKeeper):
+ *   Revenue = item_price + item_tax + shipping_price + shipping_tax - promotion_discount
+ *   - Referral Fee (Commission)
  *   - FBA Fee
- *   - Other Amazon Fees
- *   - Refund Amount (allocated to refund event date)
+ *   - Other Amazon Fees (only amount < 0 from financial events, excluding revenue charges)
+ *   - MarketplaceFacilitatorTax (offsets IVA included in gross revenue)
+ *   - Refund Amount (allocated to refund event date, not order date)
  *   - Ads Allocated (ads_spend_day / units_sold_day * quantity)
  *   - Product Cost (per marketplace)
  *   - Inbound Shipping
@@ -21,9 +58,6 @@ const SyncLogger = require('../../services/sync-logger');
  *   - Packaging
  *   - Storage Allocated (monthly / units_sold_month * quantity)
  *   = NET PROFIT
- *
- * ROI = net_profit / total_costs * 100
- * Margin = net_profit / revenue * 100
  */
 const ProfitService = {
   /**
@@ -36,7 +70,10 @@ const ProfitService = {
     try {
       logger.info('Starting profit computation', { accountId, marketplaceId, dateFrom, dateTo });
 
-      // Get all orders in range
+      // Step 1: Cleanup cancelled orders from order_profit
+      await this.cleanupCancelledOrders(accountId, marketplaceId);
+
+      // Step 2: Get all non-cancelled, non-pending orders in range
       const ordersResult = await db.query(
         `SELECT * FROM orders_raw
          WHERE account_id = $1 AND marketplace_id = $2
@@ -46,7 +83,7 @@ const ProfitService = {
         [accountId, marketplaceId, dateFrom, dateTo]
       );
 
-      // Pre-fetch financial events for all orders in range
+      // Pre-fetch financial events for all orders in range (fees only, not revenue charges)
       const feeMap = await this.buildFeeMap(accountId, marketplaceId, dateFrom, dateTo);
 
       // Pre-fetch ASIN costs
@@ -78,7 +115,35 @@ const ProfitService = {
   },
 
   /**
-   * Build a map of Amazon fees by order_id -> fee_type -> amount.
+   * Remove order_profit records for orders that have been Cancelled.
+   * These records are orphans that inflate metrics.
+   */
+  async cleanupCancelledOrders(accountId, marketplaceId) {
+    const result = await db.query(
+      `DELETE FROM order_profit op
+       USING orders_raw o
+       WHERE op.account_id = o.account_id
+         AND op.amazon_order_id = o.amazon_order_id
+         AND op.asin = o.asin
+         AND o.order_status = 'Cancelled'
+         AND op.account_id = $1
+         AND op.marketplace_id = $2`,
+      [accountId, marketplaceId]
+    );
+
+    if (result.rowCount > 0) {
+      logger.info('Cleaned up cancelled order profits', {
+        accountId, marketplaceId, deleted: result.rowCount,
+      });
+    }
+  },
+
+  /**
+   * Build a map of Amazon fees by order_id:asin -> fee_type -> amount.
+   *
+   * CRITICAL FIX: Only includes actual fees (amount < 0) from financial events.
+   * Excludes revenue charge types (Principal, Tax, ShippingCharge, etc.)
+   * which were previously being counted as "otherFees" and inflating costs.
    */
   async buildFeeMap(accountId, marketplaceId, dateFrom, dateTo) {
     const result = await db.query(
@@ -87,14 +152,21 @@ const ProfitService = {
        WHERE account_id = $1 AND marketplace_id = $2
          AND event_date >= $3 AND event_date < $4
          AND event_type = 'ShipmentEvent'
+         AND amount < 0
        GROUP BY amazon_order_id, asin, fee_type`,
       [accountId, marketplaceId, dateFrom, dateTo]
     );
 
     const map = {};
     for (const row of result.rows) {
-      const key = `${row.amazon_order_id}:${row.asin}`;
+      // Use ASIN from the row; if null, use a fallback key
+      const asin = row.asin || '__fallback__';
+      const key = `${row.amazon_order_id}:${asin}`;
       if (!map[key]) map[key] = {};
+
+      // Skip revenue charge types even if they somehow have amount < 0
+      if (REVENUE_CHARGE_TYPES.includes(row.fee_type)) continue;
+
       map[key][row.fee_type] = parseFloat(row.total_amount);
     }
     return map;
@@ -145,7 +217,6 @@ const ProfitService = {
    * Build storage allocation map: asin -> units_sold_this_month.
    */
   async buildStorageMap(accountId, marketplaceId, dateFrom, dateTo) {
-    // Get the month boundaries from the date range
     const result = await db.query(
       `SELECT asin,
         DATE_TRUNC('month', purchase_date) AS month,
@@ -170,37 +241,59 @@ const ProfitService = {
 
   /**
    * Compute and upsert profit for a single order line.
+   *
+   * Revenue is GROSS (includes IVA/tax) to match ShopKeeper:
+   *   item_price + item_tax + shipping_price + shipping_tax - promotion_discount
    */
   async computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap) {
     const orderDate = toDateStr(order.purchase_date);
     const feeKey = `${order.amazon_order_id}:${order.asin}`;
-    const fees = feeMap[feeKey] || {};
+    // Try exact key first, then fallback key (for ASIN-unresolved fees)
+    const fees = feeMap[feeKey] || feeMap[`${order.amazon_order_id}:__fallback__`] || {};
     const costs = costsMap[order.asin] || {};
     const qty = order.quantity || 1;
 
-    // Revenue = item_price + shipping_price - promotion_discount
+    // GROSS Revenue = item_price + item_tax + shipping_price + shipping_tax - promotion_discount
     const revenue = round(
       parseFloat(order.item_price || 0) +
-      parseFloat(order.shipping_price || 0) -
+      parseFloat(order.item_tax || 0) +
+      parseFloat(order.shipping_price || 0) +
+      parseFloat(order.shipping_tax || 0) -
       parseFloat(order.promotion_discount || 0)
     , 4);
 
     // Amazon fees (from financial events, stored as negative, we use absolute values)
-    const referralFee = round(Math.abs(fees['Commission'] || fees['ReferralFee'] || 0), 4);
-    const fbaFee = round(Math.abs(
-      (fees['FBAPerUnitFulfillmentFee'] || 0) +
-      (fees['FBAPerOrderFulfillmentFee'] || 0) +
-      (fees['FBAWeightBasedFee'] || 0)
-    ), 4);
+    let referralFee = 0;
+    for (const feeType of REFERRAL_FEE_TYPES) {
+      if (fees[feeType]) {
+        referralFee = Math.abs(fees[feeType]);
+        break;
+      }
+    }
+    referralFee = round(referralFee, 4);
 
-    // Other fees: everything not referral or FBA
-    const knownFeeTypes = [
-      'Commission', 'ReferralFee',
-      'FBAPerUnitFulfillmentFee', 'FBAPerOrderFulfillmentFee', 'FBAWeightBasedFee',
-    ];
+    let fbaFee = 0;
+    for (const feeType of FBA_FEE_TYPES) {
+      if (fees[feeType]) {
+        fbaFee += Math.abs(fees[feeType]);
+      }
+    }
+    fbaFee = round(fbaFee, 4);
+
+    // MarketplaceFacilitatorTax: offsets the IVA included in gross revenue
+    const mfTax = round(Math.abs(fees['MarketplaceFacilitatorTax-Principal'] || fees['MarketplaceFacilitatorTax'] || 0), 4);
+
+    // Other fees: everything not referral, FBA, MarketplaceFacilitatorTax, or revenue charges
+    const knownFeeTypes = new Set([
+      ...REFERRAL_FEE_TYPES,
+      ...FBA_FEE_TYPES,
+      ...REVENUE_CHARGE_TYPES,
+      'MarketplaceFacilitatorTax-Principal',
+      'MarketplaceFacilitatorTax',
+    ]);
     let otherFees = 0;
     for (const [feeType, amount] of Object.entries(fees)) {
-      if (!knownFeeTypes.includes(feeType)) {
+      if (!knownFeeTypes.has(feeType)) {
         otherFees += Math.abs(amount);
       }
     }
@@ -229,7 +322,7 @@ const ProfitService = {
 
     // Totals
     const totalCosts = round(
-      referralFee + fbaFee + otherFees + adsAllocated +
+      referralFee + fbaFee + otherFees + mfTax + adsAllocated +
       productCost + inboundCost + customsCost + prepCost + packagingCost + storageAllocated
     , 4);
 
@@ -242,17 +335,20 @@ const ProfitService = {
     await db.query(
       `INSERT INTO order_profit (
         account_id, marketplace_id, amazon_order_id, asin, order_date, quantity,
-        revenue, referral_fee, fba_fee, other_amazon_fees,
+        revenue, referral_fee, fba_fee, other_amazon_fees, marketplace_facilitator_tax,
         refund_amount, ads_allocated,
         product_cost, inbound_cost, customs_cost, prep_cost, packaging_cost, storage_allocated,
         total_costs, net_profit, margin_pct, roi_pct, currency, computed_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NOW())
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
       ON CONFLICT (account_id, amazon_order_id, asin) DO UPDATE SET
+        marketplace_id = EXCLUDED.marketplace_id,
+        order_date = EXCLUDED.order_date,
         quantity = EXCLUDED.quantity,
         revenue = EXCLUDED.revenue,
         referral_fee = EXCLUDED.referral_fee,
         fba_fee = EXCLUDED.fba_fee,
         other_amazon_fees = EXCLUDED.other_amazon_fees,
+        marketplace_facilitator_tax = EXCLUDED.marketplace_facilitator_tax,
         ads_allocated = EXCLUDED.ads_allocated,
         product_cost = EXCLUDED.product_cost,
         inbound_cost = EXCLUDED.inbound_cost,
@@ -268,7 +364,7 @@ const ProfitService = {
       [
         order.account_id, order.marketplace_id, order.amazon_order_id, order.asin,
         orderDate, qty,
-        revenue, referralFee, fbaFee, otherFees,
+        revenue, referralFee, fbaFee, otherFees, mfTax,
         0, // refund_amount handled separately
         adsAllocated,
         productCost, inboundCost, customsCost, prepCost, packagingCost, storageAllocated,
@@ -278,9 +374,9 @@ const ProfitService = {
   },
 
   /**
-   * Process refunds: update order_profit with refund amounts on the actual refund event date.
-   * This is separate from the main profit calculation because refunds happen
-   * at a different time than the original order.
+   * Process refunds: allocate to the actual refund event date.
+   * Refund amounts reduce profit. If ASIN is not resolved, use fallback
+   * (order line with highest revenue).
    */
   async processRefunds(accountId, marketplaceId, dateFrom, dateTo) {
     // Get all refund events in the date range
@@ -298,20 +394,56 @@ const ProfitService = {
       if (!refund.amazon_order_id) continue;
 
       const refundAmount = round(Math.abs(parseFloat(refund.refund_total)), 4);
+      const asin = refund.asin;
 
-      // Update the order_profit record with refund amount, then recalculate totals
-      await db.query(
-        `UPDATE order_profit SET
-          refund_amount = $1,
-          total_costs = total_costs + $1,
-          net_profit = revenue - (total_costs + $1),
-          margin_pct = CASE WHEN revenue > 0
-            THEN ROUND(((revenue - (total_costs + $1)) / revenue) * 100, 4)
-            ELSE 0 END,
-          computed_at = NOW()
-        WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,
-        [refundAmount, accountId, refund.amazon_order_id, refund.asin]
-      );
+      if (asin) {
+        // Direct match: update the specific order+ASIN profit record
+        await db.query(
+          `UPDATE order_profit SET
+            refund_amount = $1,
+            total_costs = referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                          ads_allocated + product_cost + inbound_cost + customs_cost +
+                          prep_cost + packaging_cost + storage_allocated + $1,
+            net_profit = revenue - (referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                          ads_allocated + product_cost + inbound_cost + customs_cost +
+                          prep_cost + packaging_cost + storage_allocated + $1),
+            margin_pct = CASE WHEN revenue > 0
+              THEN LEAST(9999.9999, GREATEST(-9999.9999,
+                ROUND(((revenue - (referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                  ads_allocated + product_cost + inbound_cost + customs_cost +
+                  prep_cost + packaging_cost + storage_allocated + $1)) / revenue) * 100, 4)))
+              ELSE 0 END,
+            computed_at = NOW()
+          WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,
+          [refundAmount, accountId, refund.amazon_order_id, asin]
+        );
+      } else {
+        // Fallback: ASIN not resolved. Allocate to the line with highest revenue.
+        await db.query(
+          `UPDATE order_profit SET
+            refund_amount = $1,
+            total_costs = referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                          ads_allocated + product_cost + inbound_cost + customs_cost +
+                          prep_cost + packaging_cost + storage_allocated + $1,
+            net_profit = revenue - (referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                          ads_allocated + product_cost + inbound_cost + customs_cost +
+                          prep_cost + packaging_cost + storage_allocated + $1),
+            margin_pct = CASE WHEN revenue > 0
+              THEN LEAST(9999.9999, GREATEST(-9999.9999,
+                ROUND(((revenue - (referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                  ads_allocated + product_cost + inbound_cost + customs_cost +
+                  prep_cost + packaging_cost + storage_allocated + $1)) / revenue) * 100, 4)))
+              ELSE 0 END,
+            computed_at = NOW()
+          WHERE id = (
+            SELECT id FROM order_profit
+            WHERE account_id = $2 AND amazon_order_id = $3
+            ORDER BY revenue DESC
+            LIMIT 1
+          )`,
+          [refundAmount, accountId, refund.amazon_order_id]
+        );
+      }
     }
 
     logger.info('Refunds processed', {
