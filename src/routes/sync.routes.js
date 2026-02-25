@@ -12,46 +12,13 @@ dayjs.extend(timezone);
 const router = Router();
 
 /**
- * POST /api/sync/trigger/:jobType
- * Manually trigger a sync job.
- * jobType: orders | financial | ads | compute | alerts
- */
-router.post('/trigger/:jobType', async (req, res, next) => {
-  try {
-    const jobMap = {
-      orders: scheduler.syncOrdersJob,
-      financial: scheduler.syncFinancialJob,
-      ads: scheduler.syncAdsJob,
-      compute: scheduler.computeAndAggregateJob,
-      alerts: scheduler.alertsJob,
-    };
-
-    const job = jobMap[req.params.jobType];
-    if (!job) {
-      return res.status(400).json({
-        error: { message: `Unknown job type: ${req.params.jobType}. Valid: ${Object.keys(jobMap).join(', ')}` },
-      });
-    }
-
-    // Run async, don't wait
-    job().catch((err) => {
-      require('../utils/logger').error('Manual job trigger failed', {
-        jobType: req.params.jobType,
-        error: err.message,
-      });
-    });
-
-    res.json({ message: `Job ${req.params.jobType} triggered` });
-  } catch (err) {
-    next(err);
-  }
-});
-
-/**
  * POST /api/sync/trigger/compute-range
  * Trigger profit computation + aggregation for a CUSTOM date range.
  * Use this when the default 30-day window doesn't cover your test period.
  * Body: { accountId, dateFrom, dateTo }
+ *
+ * IMPORTANT: This route MUST be defined before /trigger/:jobType
+ * otherwise Express matches "compute-range" as a jobType parameter.
  */
 router.post('/trigger/compute-range', async (req, res, next) => {
   try {
@@ -80,6 +47,22 @@ router.post('/trigger/compute-range', async (req, res, next) => {
     // Run async
     const seen = new Set();
     const runCompute = async () => {
+      // Global cleanup: remove ALL orphaned cancelled records for this account
+      // (covers orders cancelled outside the current compute date range)
+      const orphanCleanup = await db.query(
+        `DELETE FROM order_profit op
+         USING orders_raw o
+         WHERE op.account_id = o.account_id
+           AND op.amazon_order_id = o.amazon_order_id
+           AND op.asin = o.asin
+           AND o.account_id = $1
+           AND LOWER(o.order_status) LIKE '%cancel%'`,
+        [parseInt(accountId, 10)]
+      );
+      if (orphanCleanup.rowCount > 0) {
+        logger.info(`compute-range: cleaned ${orphanCleanup.rowCount} orphaned cancelled records globally`);
+      }
+
       for (const target of accountTargets) {
         const key = `${target.account_id}:${target.account_marketplace_id}`;
         if (seen.has(key)) continue;
@@ -114,6 +97,42 @@ router.post('/trigger/compute-range', async (req, res, next) => {
       dateRange: { from: dateFrom, to: dateTo },
       marketplaces: accountTargets.map(t => t.country_code),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/sync/trigger/:jobType
+ * Manually trigger a sync job.
+ * jobType: orders | financial | ads | compute | alerts
+ */
+router.post('/trigger/:jobType', async (req, res, next) => {
+  try {
+    const jobMap = {
+      orders: scheduler.syncOrdersJob,
+      financial: scheduler.syncFinancialJob,
+      ads: scheduler.syncAdsJob,
+      compute: scheduler.computeAndAggregateJob,
+      alerts: scheduler.alertsJob,
+    };
+
+    const job = jobMap[req.params.jobType];
+    if (!job) {
+      return res.status(400).json({
+        error: { message: `Unknown job type: ${req.params.jobType}. Valid: ${Object.keys(jobMap).join(', ')}` },
+      });
+    }
+
+    // Run async, don't wait
+    job().catch((err) => {
+      require('../utils/logger').error('Manual job trigger failed', {
+        jobType: req.params.jobType,
+        error: err.message,
+      });
+    });
+
+    res.json({ message: `Job ${req.params.jobType} triggered` });
   } catch (err) {
     next(err);
   }

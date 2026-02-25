@@ -83,7 +83,8 @@ const UnitsAuditService = {
     );
 
     // ──────────────────────────────────────────────────────────
-    // 2. CURRENT SYSTEM: what profit engine uses (old logic)
+    // 2. CURRENT SYSTEM: what profit engine actually uses
+    //    (LOWER + LIKE '%cancel%', purchase_date < end exclusive)
     // ──────────────────────────────────────────────────────────
     const currentResult = await db.query(
       `SELECT
@@ -92,7 +93,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 ${mpFilter} ${asinFilter}
          AND purchase_date >= $${dateIdx} AND purchase_date < $${dateIdx + 1}
-         AND order_status NOT IN ('Cancelled', 'Pending')`,
+         AND LOWER(order_status) NOT LIKE '%cancel%'`,
       [...baseParams, utcFrom, utcTo]
     );
 
@@ -234,7 +235,7 @@ const UnitsAuditService = {
       current_profit_engine: {
         total_units: currentTotal,
         order_lines: parseInt(currentResult.rows[0].order_lines, 10),
-        logic: "Current: excludes 'Cancelled' AND 'Pending' (case-sensitive), purchase_date < end (exclusive)",
+        logic: "Current: LOWER(order_status) NOT LIKE '%cancel%', purchase_date < end (exclusive)",
       },
       order_profit_table: {
         total_units: profitTotal,
