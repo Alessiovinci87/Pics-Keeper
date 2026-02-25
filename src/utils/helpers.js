@@ -48,21 +48,10 @@ function toDateStr(dateInput) {
  * Always goes back at least maxDaysBack to catch orders missed by earlier narrow windows.
  */
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
-  // SP-API requires CreatedBefore/PostedBefore to be at least 2 min in the past
-  const now = dayjs.utc().subtract(5, 'minute');
-  const maxFrom = now.subtract(maxDaysBack, 'day');
-  let from;
-  if (lastSyncAt) {
-    const lastSync = dayjs.utc(lastSyncAt);
-    // Use the earlier date to ensure we always cover at least maxDaysBack
-    from = lastSync.isBefore(maxFrom) ? lastSync : maxFrom;
-  } else {
-    from = maxFrom;
-  }
-  // SP-API rejects ISO dates with milliseconds - use format without ms
+  // HARDCODED DATE RANGE FOR ANALYSIS — remove this override when done
   return {
-    from: from.format('YYYY-MM-DDTHH:mm:ss[Z]'),
-    to: now.format('YYYY-MM-DDTHH:mm:ss[Z]'),
+    from: '2025-01-23T00:00:00Z',
+    to:   '2025-02-23T23:59:59Z',
   };
 }
 
