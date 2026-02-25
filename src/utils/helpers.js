@@ -48,10 +48,11 @@ function toDateStr(dateInput) {
  * Always goes back at least maxDaysBack to catch orders missed by earlier narrow windows.
  */
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
-  // HARDCODED DATE RANGE FOR ANALYSIS — remove this override when done
+  const now = dayjs.utc();
+  const from = now.subtract(maxDaysBack, 'day').startOf('day');
   return {
-    from: '2025-01-23T00:00:00Z',
-    to:   '2025-02-23T23:59:59Z',
+    from: from.toISOString(),
+    to: now.toISOString(),
   };
 }
 
@@ -71,6 +72,14 @@ async function retry(fn, { maxRetries = 3, baseDelay = 1000, label = 'operation'
     try {
       return await fn();
     } catch (err) {
+      // Don't retry client errors (4xx except 429 rate limit) - they won't succeed on retry
+      const status = err.response?.status;
+      if (status && status >= 400 && status < 500 && status !== 429) {
+        logger.error(`${label} failed with HTTP ${status}, not retrying`, {
+          error: err.message,
+        });
+        throw err;
+      }
       if (attempt === maxRetries) throw err;
       const delay = baseDelay * Math.pow(2, attempt - 1);
       logger.warn(`${label} attempt ${attempt} failed, retrying in ${delay}ms`, {
