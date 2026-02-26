@@ -1,9 +1,57 @@
 const { Router } = require('express');
 const scheduler = require('../jobs/scheduler');
 const SyncLogger = require('../services/sync-logger');
+const AccountService = require('../modules/accounts/account.service');
+const OrdersService = require('../modules/orders/orders.service');
+const logger = require('../utils/logger');
 const validate = require('../middleware/validate');
 
 const router = Router();
+
+/**
+ * POST /api/sync/trigger/orders/:countryCode
+ * Sync orders for a single marketplace (e.g. IT, FR, DE).
+ * Body: { dateFrom?: "2025-01-01" }
+ */
+router.post('/trigger/orders/:countryCode', async (req, res, next) => {
+  try {
+    const countryCode = req.params.countryCode.toUpperCase();
+    const targets = await AccountService.getActiveSyncTargets();
+    const target = targets.find((t) => t.country_code === countryCode);
+
+    if (!target) {
+      return res.status(404).json({
+        error: { message: `No active marketplace found for country code: ${countryCode}` },
+      });
+    }
+
+    const options = {};
+    if (req.body && req.body.dateFrom) {
+      options.dateFrom = req.body.dateFrom;
+    }
+
+    // Run async, same logic as syncOrdersJob but single target
+    (async () => {
+      try {
+        await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
+        await OrdersService.syncOrders(target, options);
+        await AccountService.updateSyncTimestamp(
+          target.account_id, target.account_marketplace_id, 'orders', new Date().toISOString()
+        );
+      } catch (err) {
+        await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'failed');
+        logger.error('Single marketplace orders sync failed', {
+          marketplace: countryCode,
+          error: err.message,
+        });
+      }
+    })();
+
+    res.json({ success: true, marketplace: countryCode });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /**
  * POST /api/sync/trigger/:jobType
