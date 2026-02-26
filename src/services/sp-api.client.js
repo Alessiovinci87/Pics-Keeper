@@ -74,11 +74,15 @@ class SpApiClient {
    * Retries up to 8 times with exponential backoff, respects Retry-After header.
    * Refreshes access token on 401/403 errors.
    */
+    /**
+   * Make an authenticated SP-API request.
+   * Handles 429 (rate limit) with proper backoff, retries 5xx, no retry on other 4xx.
+   */
   async request(method, path, params = {}) {
-    const maxRetries = 8;
-    const baseDelay = 3000;
+    const MAX_ATTEMPTS = 6;
+    const label = `SP-API ${method} ${path}`;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const token = await this.getAccessToken();
 
       try {
@@ -90,7 +94,6 @@ class SpApiClient {
             'Content-Type': 'application/json',
           },
           params: method === 'GET' ? params : undefined,
-          paramsSerializer: method === 'GET' ? (p) => this.serializeParams(p) : undefined,
           data: method !== 'GET' ? params : undefined,
         });
 
@@ -98,71 +101,50 @@ class SpApiClient {
       } catch (err) {
         const status = err.response?.status;
 
-        // Rate limited (429) - calculate proper wait from rate limit header
+        // 429 - Rate limited: wait using x-amzn-ratelimit-limit header or fallback
         if (status === 429) {
-          // x-amzn-RateLimit-Limit = requests per second (e.g. 0.0056 for searchOrders)
-          const rateLimitHeader = err.response?.headers?.['x-amzn-ratelimit-limit'];
-          let retryDelay;
-
-          if (rateLimitHeader) {
-            const ratePerSecond = parseFloat(rateLimitHeader);
-            // Wait = 1/rate = time to restore 1 token (e.g. 1/0.0056 = ~179s)
-            retryDelay = ratePerSecond > 0 ? Math.ceil(1 / ratePerSecond) * 1000 : 180000;
+          if (attempt === MAX_ATTEMPTS) {
+            logger.error(`${label} rate limited after ${MAX_ATTEMPTS} attempts, giving up`, { path });
+            throw new ExternalApiError(`SP-API rate limit exceeded after ${MAX_ATTEMPTS} attempts: ${path}`);
+          }
+          // x-amzn-ratelimit-limit is requests/sec; invert for wait time. Fallback 60s.
+          const rateHeader = err.response?.headers?.['x-amzn-ratelimit-limit'];
+          let waitSec;
+          if (rateHeader && parseFloat(rateHeader) > 0) {
+            waitSec = Math.ceil(1 / parseFloat(rateHeader)) + 1;
           } else {
-            // No header: use exponential backoff
-            retryDelay = baseDelay * Math.pow(2, attempt - 1);
+            waitSec = 60;
           }
+          logger.warn(`${label} 429 rate limited, waiting ${waitSec}s (attempt ${attempt}/${MAX_ATTEMPTS})`, { path });
+          await new Promise((r) => setTimeout(r, waitSec * 1000));
+          continue;
+        }
 
-          // Cap between 3s and 180s
-          retryDelay = Math.max(baseDelay, Math.min(retryDelay, 180000));
-
-          if (attempt === maxRetries) {
-            throw new ExternalApiError(`SP-API rate limited after ${maxRetries} attempts: ${path}`);
-          }
-
-          logger.info(`SP-API rate limited (429) on ${path}, waiting ${Math.round(retryDelay / 1000)}s for token restore (attempt ${attempt}/${maxRetries})`, {
+        // Other 4xx - client error, do not retry
+        if (status && status >= 400 && status < 500) {
+          logger.error(`${label} client error ${status}, not retrying`, {
             path,
-            attempt,
-            waitSeconds: Math.round(retryDelay / 1000),
+            status,
+            message: err.response?.data?.errors?.[0]?.message || err.message,
           });
-
-          await sleep(retryDelay);
-          continue;
+          throw new ExternalApiError(`SP-API ${status} error: ${path} - ${err.message}`);
         }
 
-        // Unauthorized (401/403) - refresh token and retry once
-        if ((status === 401 || status === 403) && attempt <= 2) {
-          logger.warn(`SP-API auth error (${status}) on ${path}, refreshing token`, { path });
-          await this.getAccessToken(true);
-          continue;
+        // 5xx or network error - retry with exponential backoff
+        if (attempt === MAX_ATTEMPTS) {
+          logger.error(`${label} failed after ${MAX_ATTEMPTS} attempts`, { path, error: err.message });
+          throw new ExternalApiError(`SP-API failed after ${MAX_ATTEMPTS} attempts: ${path} - ${err.message}`);
         }
-
-        // Bad request (400) - log details and throw (no point retrying)
-        if (status === 400) {
-          const errorBody = err.response?.data;
-          logger.error(`SP-API bad request (400) on ${path}`, {
-            path,
-            params: JSON.stringify(params),
-            responseBody: JSON.stringify(errorBody),
-          });
-          throw new ExternalApiError(
-            `SP-API 400 on ${path}: ${JSON.stringify(errorBody?.errors || errorBody || err.message)}`
-          );
-        }
-
-        // Server errors (5xx) - retry with backoff
-        if (status >= 500 && attempt < maxRetries) {
-          const delay = baseDelay * Math.pow(2, attempt - 1);
-          logger.warn(`SP-API server error (${status}) on ${path}, attempt ${attempt}, retrying in ${delay}ms`);
-          await sleep(delay);
-          continue;
-        }
-
-        // All other errors - throw immediately
-        throw err;
+        const backoff = 2000 * Math.pow(2, attempt - 1); // 2s, 4s, 8s, 16s, 32s
+        logger.warn(`${label} error (${status || 'network'}), retrying in ${backoff}ms (attempt ${attempt}/${MAX_ATTEMPTS})`, {
+          path,
+          error: err.message,
+        });
+        await new Promise((r) => setTimeout(r, backoff));
       }
     }
   }
+
 
   /**
    * Search orders (paginated) — Orders API v2026-01-01.
