@@ -50,13 +50,17 @@ class SpApiClient {
 
   /**
    * Make an authenticated SP-API request.
+   * Handles 429 (rate limit) with proper backoff, retries 5xx, no retry on other 4xx.
    */
   async request(method, path, params = {}) {
-    const token = await this.getAccessToken();
+    const MAX_ATTEMPTS = 6;
+    const label = `SP-API ${method} ${path}`;
 
-    const response = await retry(
-      () =>
-        axios({
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const token = await this.getAccessToken();
+
+      try {
+        const response = await axios({
           method,
           url: `${this.baseUrl}${path}`,
           headers: {
@@ -65,19 +69,54 @@ class SpApiClient {
           },
           params: method === 'GET' ? params : undefined,
           data: method !== 'GET' ? params : undefined,
-        }),
-      { maxRetries: 3, baseDelay: 2000, label: `SP-API ${method} ${path}` }
-    );
+        });
 
-    // Handle rate limiting
-    if (response.status === 429) {
-      const retryAfter = parseInt(response.headers['retry-after'] || '2', 10);
-      logger.warn('SP-API rate limited, backing off', { retryAfter, path });
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
-      return this.request(method, path, params);
+        return response.data.payload || response.data;
+      } catch (err) {
+        const status = err.response?.status;
+
+        // 429 - Rate limited: wait using x-amzn-ratelimit-limit header or fallback
+        if (status === 429) {
+          if (attempt === MAX_ATTEMPTS) {
+            logger.error(`${label} rate limited after ${MAX_ATTEMPTS} attempts, giving up`, { path });
+            throw new ExternalApiError(`SP-API rate limit exceeded after ${MAX_ATTEMPTS} attempts: ${path}`);
+          }
+          // x-amzn-ratelimit-limit is requests/sec; invert for wait time. Fallback 60s.
+          const rateHeader = err.response?.headers?.['x-amzn-ratelimit-limit'];
+          let waitSec;
+          if (rateHeader && parseFloat(rateHeader) > 0) {
+            waitSec = Math.ceil(1 / parseFloat(rateHeader)) + 1;
+          } else {
+            waitSec = 60;
+          }
+          logger.warn(`${label} 429 rate limited, waiting ${waitSec}s (attempt ${attempt}/${MAX_ATTEMPTS})`, { path });
+          await new Promise((r) => setTimeout(r, waitSec * 1000));
+          continue;
+        }
+
+        // Other 4xx - client error, do not retry
+        if (status && status >= 400 && status < 500) {
+          logger.error(`${label} client error ${status}, not retrying`, {
+            path,
+            status,
+            message: err.response?.data?.errors?.[0]?.message || err.message,
+          });
+          throw new ExternalApiError(`SP-API ${status} error: ${path} - ${err.message}`);
+        }
+
+        // 5xx or network error - retry with exponential backoff
+        if (attempt === MAX_ATTEMPTS) {
+          logger.error(`${label} failed after ${MAX_ATTEMPTS} attempts`, { path, error: err.message });
+          throw new ExternalApiError(`SP-API failed after ${MAX_ATTEMPTS} attempts: ${path} - ${err.message}`);
+        }
+        const backoff = 2000 * Math.pow(2, attempt - 1); // 2s, 4s, 8s, 16s, 32s
+        logger.warn(`${label} error (${status || 'network'}), retrying in ${backoff}ms (attempt ${attempt}/${MAX_ATTEMPTS})`, {
+          path,
+          error: err.message,
+        });
+        await new Promise((r) => setTimeout(r, backoff));
+      }
     }
-
-    return response.data.payload || response.data;
   }
 
   /**

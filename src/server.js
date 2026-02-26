@@ -18,8 +18,12 @@ async function start() {
       });
     });
 
-    // Start job scheduler
-    startScheduler();
+    // Start job scheduler (can be disabled for manual testing)
+    if (process.env.SCHEDULER_ENABLED !== 'false') {
+      startScheduler();
+    } else {
+      logger.info('Scheduler disabled via SCHEDULER_ENABLED=false');
+    }
 
     // Graceful shutdown
     const shutdown = async (signal) => {
