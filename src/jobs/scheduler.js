@@ -42,22 +42,40 @@ async function withLock(jobName, fn) {
 
 /**
  * Sync orders for all active account+marketplace combos.
+ * Uses unified sync: one API call per region with all marketplace IDs.
  */
 async function syncOrdersJob() {
   await withLock('sync-orders', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    for (const target of targets) {
+
+    // Group targets by account_id
+    const byAccount = {};
+    for (const t of targets) {
+      if (!byAccount[t.account_id]) byAccount[t.account_id] = [];
+      byAccount[t.account_id].push(t);
+    }
+
+    for (const [accountId, accountTargets] of Object.entries(byAccount)) {
       try {
-        await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
-        await OrdersService.syncOrders(target);
-        await AccountService.updateSyncTimestamp(
-          target.account_id, target.account_marketplace_id, 'orders', new Date().toISOString()
-        );
+        // Mark all marketplaces as running
+        for (const t of accountTargets) {
+          await AccountService.setSyncStatus(t.account_id, t.account_marketplace_id, 'running');
+        }
+
+        // Unified sync: one call per region, all marketplaces
+        await OrdersService.syncAllOrders(accountTargets);
+
+        // Mark all as completed with updated timestamp
+        const now = new Date().toISOString();
+        for (const t of accountTargets) {
+          await AccountService.updateSyncTimestamp(t.account_id, t.account_marketplace_id, 'orders', now);
+        }
       } catch (err) {
-        await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'failed');
-        logger.error('Orders sync failed for target', {
-          accountId: target.account_id,
-          marketplace: target.country_code,
+        for (const t of accountTargets) {
+          await AccountService.setSyncStatus(t.account_id, t.account_marketplace_id, 'failed');
+        }
+        logger.error('Orders sync failed for account', {
+          accountId,
           error: err.message,
         });
       }
