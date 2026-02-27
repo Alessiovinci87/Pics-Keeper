@@ -252,6 +252,11 @@ const AggregationService = {
              WHEN 'FR' THEN 'Europe/Paris'
              WHEN 'ES' THEN 'Europe/Madrid'
              WHEN 'GB' THEN 'Europe/London'
+             WHEN 'NL' THEN 'Europe/Amsterdam'
+             WHEN 'PL' THEN 'Europe/Warsaw'
+             WHEN 'SE' THEN 'Europe/Stockholm'
+             WHEN 'BE' THEN 'Europe/Brussels'
+             WHEN 'TR' THEN 'Europe/Istanbul'
              ELSE 'UTC'
            END
          )::date = CURRENT_DATE
@@ -287,6 +292,11 @@ const AggregationService = {
              WHEN 'FR' THEN 'Europe/Paris'
              WHEN 'ES' THEN 'Europe/Madrid'
              WHEN 'GB' THEN 'Europe/London'
+             WHEN 'NL' THEN 'Europe/Amsterdam'
+             WHEN 'PL' THEN 'Europe/Warsaw'
+             WHEN 'SE' THEN 'Europe/Stockholm'
+             WHEN 'BE' THEN 'Europe/Brussels'
+             WHEN 'TR' THEN 'Europe/Istanbul'
              ELSE 'UTC'
            END
          )::date = CURRENT_DATE
