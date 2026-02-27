@@ -421,6 +421,100 @@ const AggregationService = {
       summary: summary.rows[0],
     };
   },
+  /**
+   * Get today's sales summary directly from orders_raw (real-time, no aggregation needed).
+   * Uses marketplace timezone for accurate "today" boundary.
+   */
+  async getTodaySales(accountId) {
+    // Per-marketplace breakdown
+    const byMarketplace = await db.query(
+      `SELECT
+        m.country_code,
+        m.name AS marketplace_name,
+        COUNT(DISTINCT o.amazon_order_id) AS orders_count,
+        SUM(o.quantity) AS units_sold,
+        SUM(o.item_price + o.item_tax + o.shipping_price + o.shipping_tax - o.promotion_discount) AS gross_revenue,
+        o.currency
+      FROM orders_raw o
+      JOIN marketplaces m ON m.id = o.marketplace_id
+      WHERE o.account_id = $1
+        AND (o.purchase_date AT TIME ZONE COALESCE(
+          CASE m.country_code
+            WHEN 'IT' THEN 'Europe/Rome'
+            WHEN 'DE' THEN 'Europe/Berlin'
+            WHEN 'FR' THEN 'Europe/Paris'
+            WHEN 'ES' THEN 'Europe/Madrid'
+            WHEN 'GB' THEN 'Europe/London'
+            WHEN 'NL' THEN 'Europe/Amsterdam'
+            WHEN 'SE' THEN 'Europe/Stockholm'
+            WHEN 'PL' THEN 'Europe/Warsaw'
+            WHEN 'BE' THEN 'Europe/Brussels'
+            WHEN 'US' THEN 'America/Los_Angeles'
+            WHEN 'CA' THEN 'America/Toronto'
+            ELSE 'UTC'
+          END, 'UTC'))::date = CURRENT_DATE
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+      GROUP BY m.country_code, m.name, o.currency
+      ORDER BY gross_revenue DESC`,
+      [accountId]
+    );
+
+    // Per-ASIN breakdown (top sellers today)
+    const byAsin = await db.query(
+      `SELECT
+        o.asin,
+        a.title AS asin_title,
+        a.sku,
+        m.country_code,
+        COUNT(DISTINCT o.amazon_order_id) AS orders_count,
+        SUM(o.quantity) AS units_sold,
+        SUM(o.item_price + o.item_tax + o.shipping_price + o.shipping_tax - o.promotion_discount) AS gross_revenue,
+        o.currency
+      FROM orders_raw o
+      JOIN marketplaces m ON m.id = o.marketplace_id
+      LEFT JOIN asins a ON a.account_id = o.account_id AND a.asin = o.asin
+      WHERE o.account_id = $1
+        AND (o.purchase_date AT TIME ZONE COALESCE(
+          CASE m.country_code
+            WHEN 'IT' THEN 'Europe/Rome'
+            WHEN 'DE' THEN 'Europe/Berlin'
+            WHEN 'FR' THEN 'Europe/Paris'
+            WHEN 'ES' THEN 'Europe/Madrid'
+            WHEN 'GB' THEN 'Europe/London'
+            WHEN 'NL' THEN 'Europe/Amsterdam'
+            WHEN 'SE' THEN 'Europe/Stockholm'
+            WHEN 'PL' THEN 'Europe/Warsaw'
+            WHEN 'BE' THEN 'Europe/Brussels'
+            WHEN 'US' THEN 'America/Los_Angeles'
+            WHEN 'CA' THEN 'America/Toronto'
+            ELSE 'UTC'
+          END, 'UTC'))::date = CURRENT_DATE
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+      GROUP BY o.asin, a.title, a.sku, m.country_code, o.currency
+      ORDER BY units_sold DESC
+      LIMIT 50`,
+      [accountId]
+    );
+
+    // Totals
+    const totals = byMarketplace.rows.reduce(
+      (acc, row) => {
+        acc.orders_count += parseInt(row.orders_count, 10);
+        acc.units_sold += parseInt(row.units_sold, 10);
+        acc.gross_revenue += parseFloat(row.gross_revenue || 0);
+        return acc;
+      },
+      { orders_count: 0, units_sold: 0, gross_revenue: 0 }
+    );
+    totals.gross_revenue = round(totals.gross_revenue, 2);
+
+    return {
+      date: new Date().toISOString().slice(0, 10),
+      totals,
+      by_marketplace: byMarketplace.rows,
+      by_asin: byAsin.rows,
+    };
+  },
 };
 
 module.exports = AggregationService;

@@ -45,4 +45,20 @@ router.get('/account', validate({ query: ['accountId'] }), async (req, res, next
   }
 });
 
+/**
+ * GET /api/dashboard/today
+ * Today's sales summary (real-time from orders_raw).
+ * Query params: accountId
+ */
+router.get('/today', validate({ query: ['accountId'] }), async (req, res, next) => {
+  try {
+    const result = await AggregationService.getTodaySales(
+      parseInt(req.query.accountId, 10)
+    );
+    res.json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
