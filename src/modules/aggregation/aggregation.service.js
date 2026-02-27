@@ -223,6 +223,115 @@ const AggregationService = {
     logger.debug('Account daily KPI aggregated (all marketplaces)', { accountId });
   },
 
+  // ---- Real-time "Today Sales" from orders_raw ----
+
+  /**
+   * Get today's sales from orders_raw with timezone-aware date filtering.
+   * Returns per-marketplace summary + top ASINs breakdown.
+   */
+  async getTodaySales(accountId) {
+    // Summary by marketplace (timezone-aware: convert purchase_date to local date)
+    const summaryResult = await db.query(
+      `SELECT
+         m.country_code,
+         m.name AS marketplace_name,
+         COUNT(DISTINCT o.amazon_order_id) AS orders_count,
+         COALESCE(SUM(o.quantity), 0) AS units_sold,
+         COALESCE(SUM(
+           o.item_price + o.item_tax + o.shipping_price + o.shipping_tax
+           - o.promotion_discount
+         ), 0) AS gross_revenue,
+         o.currency
+       FROM orders_raw o
+       JOIN marketplaces m ON m.id = o.marketplace_id
+       WHERE o.account_id = $1
+         AND (o.purchase_date AT TIME ZONE
+           CASE m.country_code
+             WHEN 'IT' THEN 'Europe/Rome'
+             WHEN 'DE' THEN 'Europe/Berlin'
+             WHEN 'FR' THEN 'Europe/Paris'
+             WHEN 'ES' THEN 'Europe/Madrid'
+             WHEN 'GB' THEN 'Europe/London'
+             ELSE 'UTC'
+           END
+         )::date = CURRENT_DATE
+         AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+       GROUP BY m.country_code, m.name, o.currency
+       ORDER BY gross_revenue DESC`,
+      [accountId]
+    );
+
+    // Top 50 ASINs by units sold today (with title/SKU from asins table)
+    const asinResult = await db.query(
+      `SELECT
+         o.asin,
+         a_info.title AS asin_title,
+         a_info.sku,
+         m.country_code,
+         COUNT(DISTINCT o.amazon_order_id) AS orders_count,
+         COALESCE(SUM(o.quantity), 0) AS units_sold,
+         COALESCE(SUM(
+           o.item_price + o.item_tax + o.shipping_price + o.shipping_tax
+           - o.promotion_discount
+         ), 0) AS gross_revenue,
+         o.currency
+       FROM orders_raw o
+       JOIN marketplaces m ON m.id = o.marketplace_id
+       LEFT JOIN asins a_info
+         ON a_info.account_id = o.account_id AND a_info.asin = o.asin
+       WHERE o.account_id = $1
+         AND (o.purchase_date AT TIME ZONE
+           CASE m.country_code
+             WHEN 'IT' THEN 'Europe/Rome'
+             WHEN 'DE' THEN 'Europe/Berlin'
+             WHEN 'FR' THEN 'Europe/Paris'
+             WHEN 'ES' THEN 'Europe/Madrid'
+             WHEN 'GB' THEN 'Europe/London'
+             ELSE 'UTC'
+           END
+         )::date = CURRENT_DATE
+         AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+       GROUP BY o.asin, a_info.title, a_info.sku, m.country_code, o.currency
+       ORDER BY units_sold DESC
+       LIMIT 50`,
+      [accountId]
+    );
+
+    // Compute totals across all marketplaces
+    const totals = summaryResult.rows.reduce(
+      (acc, row) => {
+        acc.orders_count += parseInt(row.orders_count, 10);
+        acc.units_sold += parseInt(row.units_sold, 10);
+        acc.gross_revenue = round(acc.gross_revenue + parseFloat(row.gross_revenue), 2);
+        return acc;
+      },
+      { orders_count: 0, units_sold: 0, gross_revenue: 0 }
+    );
+
+    return {
+      date: new Date().toISOString().slice(0, 10),
+      totals,
+      by_marketplace: summaryResult.rows.map((r) => ({
+        country_code: r.country_code,
+        marketplace_name: r.marketplace_name,
+        orders_count: parseInt(r.orders_count, 10),
+        units_sold: parseInt(r.units_sold, 10),
+        gross_revenue: round(parseFloat(r.gross_revenue), 2),
+        currency: r.currency,
+      })),
+      top_asins: asinResult.rows.map((r) => ({
+        asin: r.asin,
+        title: r.asin_title || null,
+        sku: r.sku || null,
+        country_code: r.country_code,
+        orders_count: parseInt(r.orders_count, 10),
+        units_sold: parseInt(r.units_sold, 10),
+        gross_revenue: round(parseFloat(r.gross_revenue), 2),
+        currency: r.currency,
+      })),
+    };
+  },
+
   // ---- Query methods for API ----
 
   /**
