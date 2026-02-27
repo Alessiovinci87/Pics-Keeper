@@ -229,82 +229,96 @@ const AggregationService = {
    * Get today's sales from orders_raw with timezone-aware date filtering.
    * Returns per-marketplace summary + top ASINs breakdown.
    */
-  async getTodaySales(accountId) {
-    // Summary by marketplace (timezone-aware: convert purchase_date to local date)
+  async getTodaySales(accountId, asinFilter = null) {
+    // Use a CTE with average historical prices to estimate revenue when order price is 0.
+    // Amazon SP-API often doesn't include prices for recent/pending orders.
+    const tzCase = `
+      CASE m.country_code
+        WHEN 'IT' THEN 'Europe/Rome'
+        WHEN 'DE' THEN 'Europe/Berlin'
+        WHEN 'FR' THEN 'Europe/Paris'
+        WHEN 'ES' THEN 'Europe/Madrid'
+        WHEN 'GB' THEN 'Europe/London'
+        WHEN 'NL' THEN 'Europe/Amsterdam'
+        WHEN 'PL' THEN 'Europe/Warsaw'
+        WHEN 'SE' THEN 'Europe/Stockholm'
+        WHEN 'BE' THEN 'Europe/Brussels'
+        WHEN 'TR' THEN 'Europe/Istanbul'
+        ELSE 'UTC'
+      END`;
+
+    const params = [accountId];
+    const asinClause = asinFilter ? `AND o.asin = $${params.push(asinFilter)}` : '';
+
+    const avgPriceCte = `
+      avg_prices AS (
+        SELECT account_id, asin, marketplace_id,
+               ROUND(AVG(item_price / NULLIF(quantity, 0)), 4) AS avg_unit_price
+        FROM orders_raw
+        WHERE account_id = $1
+          AND item_price > 0
+          AND quantity > 0
+          AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
+        GROUP BY account_id, asin, marketplace_id
+      )`;
+
+    const revenueExpr = `
+      COALESCE(SUM(
+        CASE
+          WHEN o.item_price > 0 THEN o.item_price + o.item_tax + o.shipping_price + o.shipping_tax - o.promotion_discount
+          ELSE COALESCE(ap.avg_unit_price * o.quantity, 0)
+        END
+      ), 0)`;
+
+    // Summary by marketplace
     const summaryResult = await db.query(
-      `SELECT
+      `WITH ${avgPriceCte}
+       SELECT
          m.country_code,
          m.name AS marketplace_name,
          COUNT(DISTINCT o.amazon_order_id) AS orders_count,
          COALESCE(SUM(o.quantity), 0) AS units_sold,
-         COALESCE(SUM(
-           o.item_price + o.item_tax + o.shipping_price + o.shipping_tax
-           - o.promotion_discount
-         ), 0) AS gross_revenue,
+         ${revenueExpr} AS gross_revenue,
          o.currency
        FROM orders_raw o
        JOIN marketplaces m ON m.id = o.marketplace_id
+       LEFT JOIN avg_prices ap ON ap.account_id = o.account_id
+         AND ap.asin = o.asin AND ap.marketplace_id = o.marketplace_id
        WHERE o.account_id = $1
-         AND (o.purchase_date AT TIME ZONE
-           CASE m.country_code
-             WHEN 'IT' THEN 'Europe/Rome'
-             WHEN 'DE' THEN 'Europe/Berlin'
-             WHEN 'FR' THEN 'Europe/Paris'
-             WHEN 'ES' THEN 'Europe/Madrid'
-             WHEN 'GB' THEN 'Europe/London'
-             WHEN 'NL' THEN 'Europe/Amsterdam'
-             WHEN 'PL' THEN 'Europe/Warsaw'
-             WHEN 'SE' THEN 'Europe/Stockholm'
-             WHEN 'BE' THEN 'Europe/Brussels'
-             WHEN 'TR' THEN 'Europe/Istanbul'
-             ELSE 'UTC'
-           END
-         )::date = CURRENT_DATE
+         AND (o.purchase_date AT TIME ZONE ${tzCase})::date = CURRENT_DATE
          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+         ${asinClause}
        GROUP BY m.country_code, m.name, o.currency
        ORDER BY gross_revenue DESC`,
-      [accountId]
+      params
     );
 
-    // Top 50 ASINs by units sold today (with title/SKU from asins table)
+    // Top 50 ASINs by units sold today
     const asinResult = await db.query(
-      `SELECT
+      `WITH ${avgPriceCte}
+       SELECT
          o.asin,
          a_info.title AS asin_title,
          a_info.sku,
          m.country_code,
          COUNT(DISTINCT o.amazon_order_id) AS orders_count,
          COALESCE(SUM(o.quantity), 0) AS units_sold,
-         COALESCE(SUM(
-           o.item_price + o.item_tax + o.shipping_price + o.shipping_tax
-           - o.promotion_discount
-         ), 0) AS gross_revenue,
+         ${revenueExpr} AS gross_revenue,
          o.currency
        FROM orders_raw o
        JOIN marketplaces m ON m.id = o.marketplace_id
+       LEFT JOIN avg_prices ap ON ap.account_id = o.account_id
+         AND ap.asin = o.asin AND ap.marketplace_id = o.marketplace_id
        LEFT JOIN asins a_info
          ON a_info.account_id = o.account_id AND a_info.asin = o.asin
        WHERE o.account_id = $1
-         AND (o.purchase_date AT TIME ZONE
-           CASE m.country_code
-             WHEN 'IT' THEN 'Europe/Rome'
-             WHEN 'DE' THEN 'Europe/Berlin'
-             WHEN 'FR' THEN 'Europe/Paris'
-             WHEN 'ES' THEN 'Europe/Madrid'
-             WHEN 'GB' THEN 'Europe/London'
-             WHEN 'NL' THEN 'Europe/Amsterdam'
-             WHEN 'PL' THEN 'Europe/Warsaw'
-             WHEN 'SE' THEN 'Europe/Stockholm'
-             WHEN 'BE' THEN 'Europe/Brussels'
-             WHEN 'TR' THEN 'Europe/Istanbul'
-             ELSE 'UTC'
-           END
-         )::date = CURRENT_DATE
+         AND (o.purchase_date AT TIME ZONE ${tzCase})::date = CURRENT_DATE
          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+         ${asinClause}
        GROUP BY o.asin, a_info.title, a_info.sku, m.country_code, o.currency
        ORDER BY units_sold DESC
        LIMIT 50`,
-      [accountId]
+      params
     );
 
     // Compute totals across all marketplaces

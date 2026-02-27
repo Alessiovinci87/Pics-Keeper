@@ -89,11 +89,11 @@ const OrdersService = {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       ON CONFLICT (account_id, amazon_order_id, asin) DO UPDATE SET
         quantity = EXCLUDED.quantity,
-        item_price = EXCLUDED.item_price,
-        item_tax = EXCLUDED.item_tax,
-        shipping_price = EXCLUDED.shipping_price,
-        shipping_tax = EXCLUDED.shipping_tax,
-        promotion_discount = EXCLUDED.promotion_discount,
+        item_price = CASE WHEN EXCLUDED.item_price > 0 THEN EXCLUDED.item_price ELSE orders_raw.item_price END,
+        item_tax = CASE WHEN EXCLUDED.item_tax > 0 THEN EXCLUDED.item_tax ELSE orders_raw.item_tax END,
+        shipping_price = CASE WHEN EXCLUDED.shipping_price > 0 THEN EXCLUDED.shipping_price ELSE orders_raw.shipping_price END,
+        shipping_tax = CASE WHEN EXCLUDED.shipping_tax > 0 THEN EXCLUDED.shipping_tax ELSE orders_raw.shipping_tax END,
+        promotion_discount = CASE WHEN EXCLUDED.promotion_discount > 0 THEN EXCLUDED.promotion_discount ELSE orders_raw.promotion_discount END,
         order_status = EXCLUDED.order_status,
         raw_data = EXCLUDED.raw_data,
         synced_at = NOW()
