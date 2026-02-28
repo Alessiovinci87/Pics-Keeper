@@ -9,17 +9,15 @@ dayjs.extend(utc);
 
 /**
  * Orders Sync Service - incrementally fetches orders from Amazon SP-API.
+ * Uses Orders API v2026-01-01 (searchOrders) which returns items + proceeds inline.
  * Idempotent: uses ON CONFLICT to prevent duplicates.
- *
- * Key fixes:
- * - Subtracts 3 minutes from "to" timestamp (SP-API requires CreatedBefore in the past)
- * - Rate limiting: 500ms delay between getOrderItems calls
- * - Adaptive backoff for 429 responses
- * - Only retries on 429, blocks retry on other 4xx errors
  */
 const OrdersService = {
   /**
    * Sync orders for a single account+marketplace.
+   * @param {Object} target - account+marketplace target
+   * @param {Object} [options]
+   * @param {string} [options.dateFrom] - override start date (YYYY-MM-DD) for manual resync
    */
   async syncOrders(target, { dateFrom: overrideFrom } = {}) {
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'orders');
@@ -27,7 +25,7 @@ const OrdersService = {
     let inserted = 0;
 
     try {
-      // If overrideFrom provided (manual full sync), bypass syncDateRange entirely
+      // If overrideFrom provided (manual resync), use it directly; otherwise incremental
       let from, to;
       if (overrideFrom) {
         from = dayjs.utc(overrideFrom).startOf('day').toISOString();
@@ -36,32 +34,46 @@ const OrdersService = {
         ({ from, to } = syncDateRange(target.last_orders_sync_at, 30));
       }
 
-      // Subtract 3 minutes from "to" - SP-API requires CreatedBefore to be in the past
-      const adjustedTo = dayjs.utc(to).subtract(3, 'minute').toISOString();
-
       logger.info('Starting orders sync', {
         accountId: target.account_id,
         marketplace: target.country_code,
         from,
-        to: adjustedTo,
+        to,
       });
 
       const spApi = new SpApiClient(target);
-      let nextToken = null;
+      let paginationToken = null;
+      let totalOrders = 0;
+      let skipped = 0;
+      let page = 0;
+      let errors = 0;
 
       do {
-        const response = await spApi.getOrders({
-          MarketplaceIds: [target.amazon_marketplace_id],
-          CreatedAfter: from,
-          CreatedBefore: adjustedTo,
-          NextToken: nextToken,
+        page++;
+        const response = await spApi.searchOrders({
+          marketplaceIds: [target.amazon_marketplace_id],
+          createdAfter: from,
+          createdBefore: to,
+          paginationToken,
         });
 
-        const orders = response.Orders || [];
+        const orders = response.orders || [];
+        totalOrders += orders.length;
 
         for (const order of orders) {
+          const orderId = order.orderId;
+          const orderStatus = order.fulfillment?.fulfillmentStatus || 'UNKNOWN';
+
+          // Skip orders already synced with same status (optimization)
+          const alreadySynced = await this.isOrderSynced(target.account_id, orderId, orderStatus);
+          if (alreadySynced) {
+            skipped++;
+            continue;
+          }
+
           try {
-            const items = await spApi.getOrderItems(order.AmazonOrderId);
+            // v2026-01-01: items are embedded in the order response
+            const items = order.orderItems || [];
 
             for (const item of items) {
               processed++;
@@ -69,62 +81,47 @@ const OrdersService = {
               if (result === 'inserted') inserted++;
 
               // Upsert ASIN if new
-              await this.ensureAsin(target.account_id, item.ASIN, item.SellerSKU, item.Title);
+              await this.ensureAsin(
+                target.account_id,
+                item.product?.asin,
+                item.product?.sellerSku,
+                item.product?.title
+              );
             }
-
-            // Rate limiting: 500ms delay between getOrderItems calls
-            await sleep(500);
           } catch (itemErr) {
-            // Log and continue with next order if single order fails
-            logger.error('Failed to get order items', {
-              orderId: order.AmazonOrderId,
+            errors++;
+            logger.warn(`Orders sync ${target.country_code}: failed to process items for ${orderId}`, {
               error: itemErr.message,
-              status: itemErr.response?.status,
+              orderId,
+              errors,
             });
-
-            // Only retry on 429; skip other 4xx errors
-            if (itemErr.response?.status === 429) {
-              const retryAfter = parseInt(itemErr.response.headers?.['retry-after'] || '5', 10);
-              logger.warn('Rate limited on getOrderItems, backing off', { retryAfter });
-              await sleep(retryAfter * 1000);
-              // Retry this order once
-              try {
-                const retryItems = await spApi.getOrderItems(order.AmazonOrderId);
-                for (const item of retryItems) {
-                  processed++;
-                  const result = await this.upsertOrderItem(target, order, item);
-                  if (result === 'inserted') inserted++;
-                  await this.ensureAsin(target.account_id, item.ASIN, item.SellerSKU, item.Title);
-                }
-              } catch (retryErr) {
-                logger.error('Retry failed for order items', {
-                  orderId: order.AmazonOrderId,
-                  error: retryErr.message,
-                });
-              }
-            } else if (itemErr.response?.status >= 400 && itemErr.response?.status < 500) {
-              // Skip 4xx errors (except 429) - don't retry
-              logger.warn('Skipping order due to client error', {
-                orderId: order.AmazonOrderId,
-                status: itemErr.response.status,
-              });
-            }
           }
         }
 
-        nextToken = response.NextToken || null;
-      } while (nextToken);
+        paginationToken = response.pagination?.nextToken || null;
 
-      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0 });
+        // Progress logging every page
+        logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed, ${errors} errors`);
+      } while (paginationToken);
+
+      // Backfill images for ASINs missing image_url (non-blocking, IT only)
+      this.backfillImages(target, spApi).catch((err) => {
+        logger.warn('Image backfill failed (non-critical)', { error: err.message });
+      });
+
+      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0, errors, totalOrders, skipped });
 
       logger.info('Orders sync completed', {
         accountId: target.account_id,
         marketplace: target.country_code,
+        totalOrders,
         processed,
         inserted,
+        skipped,
+        errors,
       });
 
-      return { processed, inserted };
+      return { processed, inserted, errors, totalOrders, skipped };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
       logger.error('Orders sync failed', {
@@ -137,48 +134,24 @@ const OrdersService = {
   },
 
   /**
+   * Check if an order is already synced with the same status.
+   * If status changed (e.g., Pending -> Shipped), we re-process items.
+   */
+  async isOrderSynced(accountId, amazonOrderId, currentStatus) {
+    const result = await db.query(
+      `SELECT order_status FROM orders_raw
+       WHERE account_id = $1 AND amazon_order_id = $2
+       LIMIT 1`,
+      [accountId, amazonOrderId]
+    );
+    return result.rows.length > 0 && result.rows[0].order_status === currentStatus;
+  },
+
+  /**
    * Upsert a single order item (idempotent via ON CONFLICT).
-   * Extracts proceeds from both legacy and v2026 API formats.
+   * Adapted for Orders API v2026-01-01 response format.
    */
   async upsertOrderItem(target, order, item) {
-    // Support both legacy format and v2026 (item.proceeds.breakdowns)
-    let itemPrice = 0;
-    let itemTax = 0;
-    let shippingPrice = 0;
-    let shippingTax = 0;
-    let promotionDiscount = 0;
-
-    if (item.proceeds && item.proceeds.breakdowns) {
-      // v2026 format: item.proceeds.breakdowns[].type / .subtotal.amount
-      for (const bd of item.proceeds.breakdowns) {
-        const amount = parseFloat(bd.subtotal?.amount || 0);
-        switch (bd.type) {
-          case 'PRODUCT':
-            itemPrice = amount;
-            break;
-          case 'PRODUCT_TAX':
-            itemTax = amount;
-            break;
-          case 'SHIPPING':
-            shippingPrice = amount;
-            break;
-          case 'SHIPPING_TAX':
-            shippingTax = amount;
-            break;
-          case 'PROMOTION':
-            promotionDiscount = Math.abs(amount);
-            break;
-        }
-      }
-    } else {
-      // Legacy format
-      itemPrice = this.extractAmount(item.ItemPrice);
-      itemTax = this.extractAmount(item.ItemTax);
-      shippingPrice = this.extractAmount(item.ShippingPrice);
-      shippingTax = this.extractAmount(item.ShippingTax);
-      promotionDiscount = this.extractAmount(item.PromotionDiscount);
-    }
-
     const result = await db.query(
       `INSERT INTO orders_raw (
         account_id, marketplace_id, amazon_order_id, asin, sku,
@@ -186,6 +159,7 @@ const OrdersService = {
         promotion_discount, order_status, purchase_date, currency, raw_data
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       ON CONFLICT (account_id, amazon_order_id, asin) DO UPDATE SET
+        marketplace_id = EXCLUDED.marketplace_id,
         quantity = EXCLUDED.quantity,
         item_price = EXCLUDED.item_price,
         item_tax = EXCLUDED.item_tax,
@@ -199,18 +173,18 @@ const OrdersService = {
       [
         target.account_id,
         target.account_marketplace_id,
-        order.AmazonOrderId,
-        item.ASIN,
-        item.SellerSKU || null,
-        item.QuantityOrdered || 1,
-        itemPrice,
-        itemTax,
-        shippingPrice,
-        shippingTax,
-        promotionDiscount,
-        order.OrderStatus,
-        order.PurchaseDate,
-        order.OrderTotal?.CurrencyCode || target.currency,
+        order.orderId,
+        item.product?.asin,
+        item.product?.sellerSku || null,
+        item.quantityOrdered || 1,
+        this.extractProceeds(item, 'ITEM'),
+        this.extractTaxDetail(item, 'ITEM'),
+        this.extractProceeds(item, 'SHIPPING'),
+        this.extractTaxDetail(item, 'SHIPPING'),
+        this.extractProceeds(item, 'DISCOUNT'),
+        order.fulfillment?.fulfillmentStatus || 'UNKNOWN',
+        order.createdTime,
+        order.proceeds?.grandTotal?.currencyCode || target.currency,
         JSON.stringify({ order, item }),
       ]
     );
@@ -227,18 +201,97 @@ const OrdersService = {
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (account_id, asin) DO UPDATE SET
          sku = COALESCE(EXCLUDED.sku, asins.sku),
-         title = COALESCE(EXCLUDED.title, asins.title),
          updated_at = NOW()`,
       [accountId, asin, sku || null, title || null]
     );
   },
 
   /**
-   * Extract numeric amount from Amazon Money object { CurrencyCode, Amount }.
+   * Extract proceeds amount from item breakdowns by type (ITEM, SHIPPING, DISCOUNT, etc.).
+   * v2026-01-01 format: item.proceeds.breakdowns[].type / .subtotal.amount
    */
-  extractAmount(moneyObj) {
-    if (!moneyObj) return 0;
-    return parseFloat(moneyObj.Amount || moneyObj.amount || 0);
+  extractProceeds(item, type) {
+    const breakdowns = item.proceeds?.breakdowns || [];
+    const breakdown = breakdowns.find((b) => b.type === type);
+    return breakdown?.subtotal ? parseFloat(breakdown.subtotal.amount || 0) : 0;
+  },
+
+  /**
+   * Extract detailed tax amount from item breakdowns by subtype (ITEM, SHIPPING, etc.).
+   * v2026-01-01 format: TAX breakdown -> detailedBreakdowns[].subtype / .value.amount
+   */
+  extractTaxDetail(item, subtype) {
+    const breakdowns = item.proceeds?.breakdowns || [];
+    const taxBreakdown = breakdowns.find((b) => b.type === 'TAX');
+    if (!taxBreakdown?.detailedBreakdowns) {
+      // If no detailed breakdowns, return total tax for ITEM subtype, 0 otherwise
+      if (subtype === 'ITEM' && taxBreakdown?.subtotal) {
+        return parseFloat(taxBreakdown.subtotal.amount || 0);
+      }
+      return 0;
+    }
+    const detail = taxBreakdown.detailedBreakdowns.find((d) => d.subtype === subtype);
+    return detail?.value ? parseFloat(detail.value.amount || 0) : 0;
+  },
+
+  /**
+   * Backfill product images and titles for ASINs missing image_url.
+   * Only runs during IT marketplace sync to ensure Italian language titles.
+   */
+  async backfillImages(target, spApi) {
+    if (target.country_code !== 'IT') return;
+
+    const toUpdate = await db.query(
+      `SELECT asin FROM asins
+       WHERE account_id = $1
+       ORDER BY
+         CASE WHEN image_url IS NULL OR title IS NULL THEN 0 ELSE 1 END,
+         updated_at ASC
+       LIMIT 20`,
+      [target.account_id]
+    );
+
+    if (toUpdate.rows.length === 0) return;
+
+    logger.info('Backfilling product images and IT titles', {
+      accountId: target.account_id,
+      count: toUpdate.rows.length,
+    });
+
+    for (const row of toUpdate.rows) {
+      try {
+        const catalog = await spApi.getCatalogItem(row.asin, target.amazon_marketplace_id);
+
+        let imageUrl = null;
+        const images = catalog?.images;
+        if (images && images.length > 0) {
+          const mainImage = images[0]?.images?.find((img) => img.variant === 'MAIN');
+          imageUrl = mainImage?.link || images[0]?.images?.[0]?.link || null;
+        }
+
+        let title = null;
+        const summaries = catalog?.summaries;
+        if (summaries && summaries.length > 0) {
+          title = summaries[0]?.itemName || null;
+        }
+
+        if (imageUrl || title) {
+          await db.query(
+            `UPDATE asins SET
+              image_url = COALESCE($1, image_url),
+              title = COALESCE($2, title),
+              updated_at = NOW()
+            WHERE account_id = $3 AND asin = $4`,
+            [imageUrl, title, target.account_id, row.asin]
+          );
+        }
+      } catch (err) {
+        logger.warn('Failed to fetch catalog item image', {
+          asin: row.asin,
+          error: err.message,
+        });
+      }
+    }
   },
 
   /**

@@ -1,7 +1,7 @@
 const axios = require('axios');
 const config = require('../config');
 const logger = require('../utils/logger');
-const { retry } = require('../utils/helpers');
+const { sleep } = require('../utils/helpers');
 const { ExternalApiError } = require('../utils/errors');
 
 /**
@@ -27,36 +27,58 @@ class SpApiClient {
   /**
    * Get or refresh LWA access token.
    */
-  async getAccessToken() {
-    if (this.accessToken && Date.now() < this.tokenExpiresAt - 60000) {
+  async getAccessToken(forceRefresh = false) {
+    if (!forceRefresh && this.accessToken && Date.now() < this.tokenExpiresAt - 60000) {
       return this.accessToken;
     }
 
-    const response = await retry(
-      () =>
-        axios.post('https://api.amazon.com/auth/o2/token', {
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const response = await axios.post('https://api.amazon.com/auth/o2/token', {
           grant_type: 'refresh_token',
           refresh_token: this.target.sp_api_refresh_token,
           client_id: config.spApi.clientId,
           client_secret: config.spApi.clientSecret,
-        }),
-      { maxRetries: 3, baseDelay: 2000, label: 'SP-API token' }
-    );
+        });
 
-    this.accessToken = response.data.access_token;
-    this.tokenExpiresAt = Date.now() + response.data.expires_in * 1000;
-    return this.accessToken;
+        this.accessToken = response.data.access_token;
+        this.tokenExpiresAt = Date.now() + response.data.expires_in * 1000;
+        return this.accessToken;
+      } catch (err) {
+        if (attempt === 4) throw err;
+        const delay = 2000 * Math.pow(2, attempt - 1);
+        logger.warn(`SP-API token refresh attempt ${attempt} failed, retrying in ${delay}ms`, {
+          error: err.message,
+        });
+        await sleep(delay);
+      }
+    }
   }
 
   /**
-   * Make an authenticated SP-API request.
-   * Handles 429 (rate limit) with proper backoff, retries 5xx, no retry on other 4xx.
+   * Custom params serializer that does NOT encode commas.
+   * Amazon SP-API expects MarketplaceIds=A1,A2 (raw commas).
+   */
+  serializeParams(params) {
+    const parts = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
+      parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+    }
+    // Restore commas that were encoded (SP-API expects raw commas for list params)
+    return parts.join('&').replace(/%2C/gi, ',');
+  }
+
+  /**
+   * Make an authenticated SP-API request with built-in rate-limit handling.
+   * Retries up to 8 times with exponential backoff, respects rate-limit header.
+   * Refreshes access token on 401/403 errors.
    */
   async request(method, path, params = {}) {
-    const MAX_ATTEMPTS = 6;
-    const label = `SP-API ${method} ${path}`;
+    const maxRetries = 8;
+    const baseDelay = 3000;
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const token = await this.getAccessToken();
 
       try {
@@ -68,6 +90,7 @@ class SpApiClient {
             'Content-Type': 'application/json',
           },
           params: method === 'GET' ? params : undefined,
+          paramsSerializer: method === 'GET' ? (p) => this.serializeParams(p) : undefined,
           data: method !== 'GET' ? params : undefined,
         });
 
@@ -75,52 +98,88 @@ class SpApiClient {
       } catch (err) {
         const status = err.response?.status;
 
-        // 429 - Rate limited: wait using x-amzn-ratelimit-limit header or fallback
+        // Rate limited (429) - calculate proper wait from rate limit header
         if (status === 429) {
-          if (attempt === MAX_ATTEMPTS) {
-            logger.error(`${label} rate limited after ${MAX_ATTEMPTS} attempts, giving up`, { path });
-            throw new ExternalApiError(`SP-API rate limit exceeded after ${MAX_ATTEMPTS} attempts: ${path}`);
-          }
-          // x-amzn-ratelimit-limit is requests/sec; invert for wait time. Fallback 60s.
-          const rateHeader = err.response?.headers?.['x-amzn-ratelimit-limit'];
-          let waitSec;
-          if (rateHeader && parseFloat(rateHeader) > 0) {
-            waitSec = Math.ceil(1 / parseFloat(rateHeader)) + 1;
+          const rateLimitHeader = err.response?.headers?.['x-amzn-ratelimit-limit'];
+          let retryDelay;
+
+          if (rateLimitHeader) {
+            const ratePerSecond = parseFloat(rateLimitHeader);
+            retryDelay = ratePerSecond > 0 ? Math.ceil(1 / ratePerSecond) * 1000 : 180000;
           } else {
-            waitSec = 60;
+            retryDelay = baseDelay * Math.pow(2, attempt - 1);
           }
-          logger.warn(`${label} 429 rate limited, waiting ${waitSec}s (attempt ${attempt}/${MAX_ATTEMPTS})`, { path });
-          await new Promise((r) => setTimeout(r, waitSec * 1000));
+
+          // Cap between 3s and 180s
+          retryDelay = Math.max(baseDelay, Math.min(retryDelay, 180000));
+
+          if (attempt === maxRetries) {
+            throw new ExternalApiError(`SP-API rate limited after ${maxRetries} attempts: ${path}`);
+          }
+
+          logger.info(`SP-API rate limited (429) on ${path}, waiting ${Math.round(retryDelay / 1000)}s for token restore (attempt ${attempt}/${maxRetries})`, {
+            path,
+            attempt,
+            waitSeconds: Math.round(retryDelay / 1000),
+          });
+
+          await sleep(retryDelay);
           continue;
         }
 
-        // Other 4xx - client error, do not retry
-        if (status && status >= 400 && status < 500) {
-          logger.error(`${label} client error ${status}, not retrying`, {
-            path,
-            status,
-            message: err.response?.data?.errors?.[0]?.message || err.message,
-          });
-          throw new ExternalApiError(`SP-API ${status} error: ${path} - ${err.message}`);
+        // Unauthorized (401/403) - refresh token and retry once
+        if ((status === 401 || status === 403) && attempt <= 2) {
+          logger.warn(`SP-API auth error (${status}) on ${path}, refreshing token`, { path });
+          await this.getAccessToken(true);
+          continue;
         }
 
-        // 5xx or network error - retry with exponential backoff
-        if (attempt === MAX_ATTEMPTS) {
-          logger.error(`${label} failed after ${MAX_ATTEMPTS} attempts`, { path, error: err.message });
-          throw new ExternalApiError(`SP-API failed after ${MAX_ATTEMPTS} attempts: ${path} - ${err.message}`);
+        // Bad request (400) - log details and throw (no point retrying)
+        if (status === 400) {
+          const errorBody = err.response?.data;
+          logger.error(`SP-API bad request (400) on ${path}`, {
+            path,
+            params: JSON.stringify(params),
+            responseBody: JSON.stringify(errorBody),
+          });
+          throw new ExternalApiError(
+            `SP-API 400 on ${path}: ${JSON.stringify(errorBody?.errors || errorBody || err.message)}`
+          );
         }
-        const backoff = 2000 * Math.pow(2, attempt - 1); // 2s, 4s, 8s, 16s, 32s
-        logger.warn(`${label} error (${status || 'network'}), retrying in ${backoff}ms (attempt ${attempt}/${MAX_ATTEMPTS})`, {
-          path,
-          error: err.message,
-        });
-        await new Promise((r) => setTimeout(r, backoff));
+
+        // Server errors (5xx) - retry with backoff
+        if (status >= 500 && attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+          logger.warn(`SP-API server error (${status}) on ${path}, attempt ${attempt}, retrying in ${delay}ms`);
+          await sleep(delay);
+          continue;
+        }
+
+        // All other errors - throw immediately
+        throw err;
       }
     }
   }
 
   /**
-   * Get orders (paginated).
+   * Search orders (paginated) — Orders API v2026-01-01.
+   * Returns orders WITH embedded orderItems (no separate getOrderItems call needed).
+   * includedData: PROCEEDS (prices/taxes), FULFILLMENT (order status).
+   */
+  async searchOrders({ marketplaceIds, createdAfter, createdBefore, paginationToken }) {
+    const params = {
+      marketplaceIds: marketplaceIds.join(','),
+      createdAfter,
+      createdBefore,
+      includedData: 'PROCEEDS,FULFILLMENT',
+    };
+    if (paginationToken) params.paginationToken = paginationToken;
+
+    return this.request('GET', '/orders/2026-01-01/orders', params);
+  }
+
+  /**
+   * Get orders (paginated) — Orders API v0 (legacy).
    */
   async getOrders({ MarketplaceIds, CreatedAfter, CreatedBefore, NextToken }) {
     const params = {
@@ -134,7 +193,7 @@ class SpApiClient {
   }
 
   /**
-   * Get order items for a specific order.
+   * Get order items for a specific order (legacy v0 API).
    */
   async getOrderItems(orderId) {
     const result = await this.request('GET', `/orders/v0/orders/${orderId}/orderItems`);
@@ -149,6 +208,19 @@ class SpApiClient {
     if (NextToken) params.NextToken = NextToken;
 
     return this.request('GET', '/finances/v0/financialEvents', params);
+  }
+
+  /**
+   * Get catalog item details (images, title) for an ASIN.
+   * Uses Catalog Items API v2022-04-01.
+   */
+  async getCatalogItem(asin, marketplaceId) {
+    await sleep(500);
+    const result = await this.request('GET', `/catalog/2022-04-01/items/${asin}`, {
+      marketplaceIds: marketplaceId,
+      includedData: 'images,summaries',
+    });
+    return result;
   }
 }
 
