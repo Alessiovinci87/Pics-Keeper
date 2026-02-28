@@ -34,6 +34,9 @@ const OrdersService = {
         ({ from, to } = syncDateRange(target.last_orders_sync_at, 30));
       }
 
+      // SP-API requires createdBefore to be at least 2 minutes in the past
+      to = dayjs.utc(to).subtract(3, 'minute').toISOString();
+
       logger.info('Starting orders sync', {
         accountId: target.account_id,
         marketplace: target.country_code,
