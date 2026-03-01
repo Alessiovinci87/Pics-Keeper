@@ -38,7 +38,13 @@ const FinancialService = {
     let inserted = 0;
 
     try {
-      const { from, to } = syncDateRange(target.last_financial_sync_at, 30);
+      const { from, to: rawTo } = syncDateRange(target.last_financial_sync_at, 30);
+      // Cap 'to' at now - 3 minutes to avoid SP-API "no later than 2 minutes from now" error
+      const dayjs = require('dayjs');
+      const utc = require('dayjs/plugin/utc');
+      dayjs.extend(utc);
+      const maxTo = dayjs.utc().subtract(3, 'minute').toISOString();
+      const to = rawTo > maxTo ? maxTo : rawTo;
 
       logger.info('Starting financial sync (account-level)', {
         accountId: target.account_id,
