@@ -113,13 +113,16 @@ async function syncAdsJob() {
 
 /**
  * Run profit computation and aggregation for all accounts.
- * Processes the last 7 days to ensure data freshness.
+ * By default processes the last 7 days; accepts optional dateFrom/dateTo override
+ * for historical recomputation via manual trigger.
  */
-async function computeAndAggregateJob() {
+async function computeAndAggregateJob(options = {}) {
   await withLock('compute-aggregate', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    const dateFrom = dayjs.utc().subtract(7, 'day').format('YYYY-MM-DD');
-    const dateTo = dayjs.utc().add(1, 'day').format('YYYY-MM-DD');
+    const dateFrom = options.dateFrom || dayjs.utc().subtract(7, 'day').format('YYYY-MM-DD');
+    const dateTo = options.dateTo || dayjs.utc().add(1, 'day').format('YYYY-MM-DD');
+
+    logger.info('Compute/aggregate job starting', { dateFrom, dateTo });
 
     // Group by account+marketplace to avoid duplicates
     const seen = new Set();

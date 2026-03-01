@@ -75,10 +75,13 @@ router.post('/trigger/:jobType', async (req, res, next) => {
       });
     }
 
-    // Pass body options (e.g. dateFrom for historical sync) to the job
+    // Pass body options (e.g. dateFrom/dateTo for historical sync) to the job
     const options = {};
     if (req.body && req.body.dateFrom) {
       options.dateFrom = req.body.dateFrom;
+    }
+    if (req.body && req.body.dateTo) {
+      options.dateTo = req.body.dateTo;
     }
 
     // Run async, don't wait
