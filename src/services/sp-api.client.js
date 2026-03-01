@@ -77,6 +77,7 @@ class SpApiClient {
   async request(method, path, params = {}) {
     const maxRetries = 8;
     const baseDelay = 3000;
+    let wasRateLimited = false;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const token = await this.getAccessToken();
@@ -93,6 +94,11 @@ class SpApiClient {
           paramsSerializer: method === 'GET' ? (p) => this.serializeParams(p) : undefined,
           data: method !== 'GET' ? params : undefined,
         });
+
+        // After recovering from rate limit, add cooldown to let tokens rebuild
+        if (wasRateLimited) {
+          await sleep(3000);
+        }
 
         return response.data.payload || response.data;
       } catch (err) {
@@ -124,6 +130,7 @@ class SpApiClient {
           });
 
           await sleep(retryDelay);
+          wasRateLimited = true;
           continue;
         }
 

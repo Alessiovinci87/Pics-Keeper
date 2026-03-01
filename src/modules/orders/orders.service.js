@@ -19,7 +19,7 @@ const OrdersService = {
    * @param {Object} [options]
    * @param {string} [options.dateFrom] - override start date (YYYY-MM-DD) for manual resync
    */
-  async syncOrders(target, { dateFrom: overrideFrom } = {}) {
+  async syncOrders(target, { dateFrom: overrideFrom, dateTo: overrideTo } = {}) {
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'orders');
     let processed = 0;
     let inserted = 0;
@@ -29,7 +29,7 @@ const OrdersService = {
       let from, to;
       if (overrideFrom) {
         from = dayjs.utc(overrideFrom).startOf('day').toISOString();
-        to = dayjs.utc().toISOString();
+        to = overrideTo ? dayjs.utc(overrideTo).endOf('day').toISOString() : dayjs.utc().toISOString();
       } else {
         ({ from, to } = syncDateRange(target.last_orders_sync_at, 30));
       }
@@ -105,6 +105,11 @@ const OrdersService = {
 
         // Progress logging every page
         logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed, ${errors} errors`);
+
+        // Throttle between pages to avoid burning SP-API rate-limit tokens
+        if (paginationToken) {
+          await sleep(2000);
+        }
       } while (paginationToken);
 
       // Backfill images for ASINs missing image_url (non-blocking, IT only)
