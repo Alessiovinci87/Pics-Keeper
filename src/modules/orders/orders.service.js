@@ -35,7 +35,9 @@ const OrdersService = {
       }
 
       // SP-API requires createdBefore to be at least 2 minutes in the past
-      to = dayjs.utc(to).subtract(3, 'minute').toISOString();
+      // Cap 'to' at now-3min to prevent future dates (e.g. endOf('day') on today)
+      const maxTo = dayjs.utc().subtract(3, 'minute');
+      to = dayjs.utc(to).isAfter(maxTo) ? maxTo.toISOString() : dayjs.utc(to).toISOString();
 
       logger.info('Starting orders sync', {
         accountId: target.account_id,
