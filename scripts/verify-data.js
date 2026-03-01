@@ -5,7 +5,7 @@
  * Example: node scripts/verify-data.js 2026-02-01 FR,NL,GB,PL
  */
 require('dotenv').config();
-const pool = require('../src/database/pool');
+const { pool, shutdown } = require('../src/database/pool');
 
 const dateFrom = process.argv[2] || '2026-02-01';
 const countries = (process.argv[3] || 'FR,NL,GB,PL').split(',').map(c => c.trim());
@@ -159,7 +159,7 @@ async function run() {
 
   } finally {
     client.release();
-    await pool.end();
+    await shutdown();
   }
 }
 
