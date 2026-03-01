@@ -113,10 +113,11 @@ const ProfitService = {
         [accountId, marketplaceId, dateFrom, dateTo, tz]
       );
 
-      // Pre-fetch financial events (widen by 1 day each side for boundary orders)
+      // Pre-fetch financial events (widen by 30 days each side — financial events
+      // typically lag 7-14 days behind order purchase_date)
       const dayjs = require('dayjs');
-      const feeFrom = dayjs.utc(dateFrom).subtract(1, 'day').format('YYYY-MM-DD');
-      const feeTo = dayjs.utc(dateTo).add(1, 'day').format('YYYY-MM-DD');
+      const feeFrom = dayjs.utc(dateFrom).subtract(30, 'day').format('YYYY-MM-DD');
+      const feeTo = dayjs.utc(dateTo).add(30, 'day').format('YYYY-MM-DD');
       const feeMap = await this.buildFeeMap(accountId, marketplaceId, feeFrom, feeTo);
 
       // Pre-fetch ASIN costs
