@@ -8,6 +8,7 @@
  *   node scripts/resync-orders.js 2026-02-27              # resync from Feb 27 to now, all marketplaces
  *   node scripts/resync-orders.js 2026-02-27 IT           # resync only IT
  *   node scripts/resync-orders.js 2026-02-27 IT,FR,ES     # resync IT, FR, ES
+ *   node scripts/resync-orders.js 2026-02-27 FR --force   # force resync (bypass skip optimization)
  */
 require('dotenv').config();
 const dayjs = require('dayjs');
@@ -19,12 +20,17 @@ const AccountService = require('../src/modules/accounts/account.service');
 const db = require('../src/database/pool');
 const { sleep } = require('../src/utils/helpers');
 
-const dateFrom = process.argv[2];
-const countryFilter = process.argv[3] ? process.argv[3].toUpperCase().split(',') : null;
+// Parse --force flag from any position
+const args = process.argv.slice(2).filter(a => a !== '--force');
+const forceMode = process.argv.includes('--force');
+
+const dateFrom = args[0];
+const countryFilter = args[1] ? args[1].toUpperCase().split(',') : null;
 
 if (!dateFrom) {
-  console.error('Usage: node scripts/resync-orders.js <YYYY-MM-DD> [country1,country2,...]');
+  console.error('Usage: node scripts/resync-orders.js <YYYY-MM-DD> [country1,country2,...] [--force]');
   console.error('Example: node scripts/resync-orders.js 2026-02-27 IT,FR,ES');
+  console.error('Example: node scripts/resync-orders.js 2026-02-01 FR,NL,GB,PL --force');
   process.exit(1);
 }
 
@@ -57,6 +63,7 @@ function buildMonthlyChunks(startDate, endDate) {
     console.log(`\n${'='.repeat(60)}`);
     console.log(`  RESYNC ORDINI dal ${dateFrom}`);
     if (countryFilter) console.log(`  Filtro paesi: ${countryFilter.join(', ')}`);
+    if (forceMode) console.log(`  MODALITA FORCE: bypass skip optimization`);
     console.log(`  Suddiviso in ${chunks.length} chunk mensili`);
     console.log(`${'='.repeat(60)}\n`);
 
@@ -93,7 +100,7 @@ function buildMonthlyChunks(startDate, endDate) {
         console.log(`    [${target.country_code}] Chunk ${i + 1}/${chunks.length}: ${chunkLabel}`);
 
         try {
-          const result = await OrdersService.syncOrders(target, { dateFrom: chunk.from, dateTo: chunk.to });
+          const result = await OrdersService.syncOrders(target, { dateFrom: chunk.from, dateTo: chunk.to, force: forceMode });
           totalProcessed += result.processed;
           totalInserted += result.inserted;
           totalErrors += result.errors || 0;

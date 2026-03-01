@@ -19,7 +19,7 @@ const OrdersService = {
    * @param {Object} [options]
    * @param {string} [options.dateFrom] - override start date (YYYY-MM-DD) for manual resync
    */
-  async syncOrders(target, { dateFrom: overrideFrom, dateTo: overrideTo } = {}) {
+  async syncOrders(target, { dateFrom: overrideFrom, dateTo: overrideTo, force = false } = {}) {
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'orders');
     let processed = 0;
     let inserted = 0;
@@ -68,10 +68,13 @@ const OrdersService = {
           const orderStatus = order.fulfillment?.fulfillmentStatus || 'UNKNOWN';
 
           // Skip orders already synced with same status (optimization)
-          const alreadySynced = await this.isOrderSynced(target.account_id, orderId, orderStatus);
-          if (alreadySynced) {
-            skipped++;
-            continue;
+          // --force bypasses this check to ensure all SP-API orders are re-processed
+          if (!force) {
+            const alreadySynced = await this.isOrderSynced(target.account_id, orderId, orderStatus);
+            if (alreadySynced) {
+              skipped++;
+              continue;
+            }
           }
 
           try {
