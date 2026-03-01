@@ -65,7 +65,7 @@ const dateTo = process.argv[4] || '2026-03-01';
     console.log('--- 2. ORDERS_RAW totali (tutti gli status) ---');
     console.table(rawTotals.rows);
 
-    // 3. order_profit
+    // 3. order_profit (handle missing marketplace_facilitator_tax column)
     const profitData = await db.query(`
       SELECT
         COUNT(DISTINCT op.amazon_order_id) AS distinct_orders,
@@ -75,8 +75,7 @@ const dateTo = process.argv[4] || '2026-03-01';
         ROUND(SUM(op.referral_fee)::numeric, 2) AS referral_fee,
         ROUND(SUM(op.fba_fee)::numeric, 2) AS fba_fee,
         ROUND(SUM(op.other_amazon_fees)::numeric, 2) AS other_fees,
-        ROUND(SUM(op.marketplace_facilitator_tax)::numeric, 2) AS mf_tax,
-        ROUND(SUM(op.referral_fee + op.fba_fee + op.other_amazon_fees + op.marketplace_facilitator_tax)::numeric, 2) AS total_amazon_fees,
+        ROUND(SUM(op.referral_fee + op.fba_fee + op.other_amazon_fees)::numeric, 2) AS total_amazon_fees,
         ROUND(SUM(op.net_profit)::numeric, 2) AS net_profit
       FROM order_profit op
       JOIN marketplaces m ON m.id = op.marketplace_id
