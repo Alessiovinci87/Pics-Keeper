@@ -62,34 +62,86 @@ async function run() {
         units_sold, orders_count, revenue,
         total_amazon_fees, net_profit, margin_pct
       FROM account_daily_kpi
-      WHERE marketplace_id IS NULL AND kpi_date = $2
-    `, [mpId, testDate]);
+      WHERE marketplace_id IS NULL AND kpi_date = $1
+    `, [testDate]);
     console.log('\n  LAYER 3b - account_daily_kpi (ALL, mp=NULL):');
     console.log('  ', JSON.stringify(kpiAll.rows[0] || 'NESSUN RECORD', null, 2));
 
-    // Check: how many rows in account_daily_kpi for this date?
-    const kpiCount = await client.query(`
-      SELECT marketplace_id, units_sold, revenue, total_amazon_fees, net_profit
-      FROM account_daily_kpi
-      WHERE kpi_date = $1
-      ORDER BY marketplace_id NULLS LAST
-    `, [testDate]);
-    console.log('\n  TUTTE le righe account_daily_kpi per', testDate, ':');
-    for (const r of kpiCount.rows) {
-      console.log(`    mp=${r.marketplace_id || 'NULL'} units=${r.units_sold} rev=${r.revenue} fees=${r.total_amazon_fees} profit=${r.net_profit}`);
+    // ─── DIAGNOSI FINANCIAL EVENTS ───
+    console.log('\n  ─── FINANCIAL EVENTS RAW ───');
+
+    // Total financial events for this marketplace in Feb
+    const feTotal = await client.query(`
+      SELECT
+        COUNT(*) AS righe,
+        COUNT(DISTINCT amazon_order_id) AS ordini_distinti,
+        MIN(event_date) AS min_date,
+        MAX(event_date) AS max_date
+      FROM financial_events_raw
+      WHERE marketplace_id = $1
+        AND event_date >= '2026-02-01' AND event_date < '2026-03-02'
+    `, [mpId]);
+    console.log('  Totale eventi finanziari FR (feb):');
+    console.log('  ', JSON.stringify(feTotal.rows[0], null, 2));
+
+    // Fee events specifically (amount < 0, ShipmentEvent)
+    const feFees = await client.query(`
+      SELECT
+        COUNT(*) AS righe_fee,
+        COUNT(DISTINCT amazon_order_id) AS ordini_con_fee,
+        SUM(amount) AS total_fee_amount
+      FROM financial_events_raw
+      WHERE marketplace_id = $1
+        AND event_date >= '2026-02-01' AND event_date < '2026-03-02'
+        AND event_type = 'ShipmentEvent'
+        AND amount < 0
+    `, [mpId]);
+    console.log('  Eventi fee (ShipmentEvent, amount<0):');
+    console.log('  ', JSON.stringify(feFees.rows[0], null, 2));
+
+    // Check a specific order that has fees=0 in order_profit
+    const sampleOrder = await client.query(`
+      SELECT amazon_order_id, asin, revenue, referral_fee, fba_fee
+      FROM order_profit
+      WHERE marketplace_id = $1 AND order_date = $2
+        AND referral_fee = 0 AND revenue > 0
+      LIMIT 1
+    `, [mpId, testDate]);
+    if (sampleOrder.rows[0]) {
+      const oid = sampleOrder.rows[0].amazon_order_id;
+      const asin = sampleOrder.rows[0].asin;
+      console.log(`\n  Ordine campione senza fees: ${oid} (ASIN: ${asin}, revenue: ${sampleOrder.rows[0].revenue})`);
+
+      const feForOrder = await client.query(`
+        SELECT event_type, fee_type, amount, event_date
+        FROM financial_events_raw
+        WHERE amazon_order_id = $1
+        ORDER BY event_date
+      `, [oid]);
+      if (feForOrder.rows.length === 0) {
+        console.log('    NESSUN evento finanziario trovato per questo ordine!');
+      } else {
+        console.log(`    ${feForOrder.rows.length} eventi finanziari trovati:`);
+        for (const r of feForOrder.rows) {
+          console.log(`      ${r.event_type} | ${r.fee_type} | ${r.amount} | ${r.event_date}`);
+        }
+      }
     }
 
-    // Sample: first 5 asin_daily_metrics rows for this date
-    const sample = await client.query(`
-      SELECT asin, units_sold, revenue, total_amazon_fees, net_profit
-      FROM asin_daily_metrics
-      WHERE marketplace_id = $1 AND metric_date = $2
-      ORDER BY revenue DESC
-      LIMIT 5
-    `, [mpId, testDate]);
-    console.log('\n  SAMPLE asin_daily_metrics (top 5 by revenue):');
-    for (const r of sample.rows) {
-      console.log(`    ${r.asin}: units=${r.units_sold} rev=${r.revenue} fees=${r.total_amazon_fees} profit=${r.net_profit}`);
+    // Check: which dates have fees > 0 in order_profit?
+    const datesWithFees = await client.query(`
+      SELECT order_date,
+        COUNT(*) AS righe,
+        SUM(referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax) AS total_fees
+      FROM order_profit
+      WHERE marketplace_id = $1 AND order_date >= '2026-02-01'
+      GROUP BY order_date
+      ORDER BY order_date
+    `, [mpId]);
+    console.log('\n  Fees per giorno in order_profit (FR):');
+    for (const r of datesWithFees.rows) {
+      const marker = Number(r.total_fees) > 0 ? ' <<<' : '';
+      console.log(`    ${r.order_date.toISOString().slice(0,10)}: ${r.righe} righe, fees=${Number(r.total_fees).toFixed(2)}${marker}`);
     }
 
     console.log('');
