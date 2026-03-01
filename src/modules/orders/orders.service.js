@@ -112,8 +112,8 @@ const OrdersService = {
         }
       } while (paginationToken);
 
-      // Backfill images for ASINs missing image_url (non-blocking, IT only)
-      this.backfillImages(target, spApi).catch((err) => {
+      // Backfill images for ASINs missing image_url (IT only)
+      await this.backfillImages(target, spApi).catch((err) => {
         logger.warn('Image backfill failed (non-critical)', { error: err.message });
       });
 
