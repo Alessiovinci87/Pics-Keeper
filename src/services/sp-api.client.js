@@ -34,9 +34,14 @@ class SpApiClient {
 
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
+        // Use region-specific refresh token: NA token for NA region, default for EU
+        const refreshToken = this.target.region === 'NA' && this.target.sp_api_refresh_token_na
+          ? this.target.sp_api_refresh_token_na
+          : this.target.sp_api_refresh_token;
+
         const response = await axios.post('https://api.amazon.com/auth/o2/token', {
           grant_type: 'refresh_token',
-          refresh_token: this.target.sp_api_refresh_token,
+          refresh_token: refreshToken,
           client_id: config.spApi.clientId,
           client_secret: config.spApi.clientSecret,
         });
