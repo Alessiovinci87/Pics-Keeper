@@ -149,7 +149,13 @@ class SpApiClient {
 
         // Unauthorized (401/403) - refresh token and retry once
         if ((status === 401 || status === 403) && attempt <= 2) {
-          logger.warn(`SP-API auth error (${status}) on ${path}, refreshing token`, { path });
+          const authErrorBody = err.response?.data;
+          logger.warn(`SP-API auth error (${status}) on ${path}, refreshing token`, {
+            path,
+            endpoint: this.baseUrl,
+            region: this.target.region,
+            responseBody: JSON.stringify(authErrorBody),
+          });
           await this.getAccessToken(true);
           continue;
         }
