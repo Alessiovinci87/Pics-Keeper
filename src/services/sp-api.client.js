@@ -39,6 +39,14 @@ class SpApiClient {
           ? this.target.sp_api_refresh_token_na
           : this.target.sp_api_refresh_token;
 
+        logger.info('SP-API token exchange', {
+          region: this.target.region,
+          country: this.target.country_code,
+          usingNaToken: !!(this.target.region === 'NA' && this.target.sp_api_refresh_token_na),
+          tokenPrefix: refreshToken ? refreshToken.substring(0, 15) + '...' : 'MISSING',
+          endpoint: this.baseUrl,
+        });
+
         const response = await axios.post('https://api.amazon.com/auth/o2/token', {
           grant_type: 'refresh_token',
           refresh_token: refreshToken,
