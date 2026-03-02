@@ -15,6 +15,8 @@ function App() {
   const [accounts, setAccounts] = useState([]);
   const [selectedAccountId, setSelectedAccountId] = useState(null);
   const [products, setProducts] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0 });
   const [loading, setLoading] = useState(true);
   const [backendConnected, setBackendConnected] = useState(false);
   const [selectedMarketplace, setSelectedMarketplace] = useState(null);
@@ -28,12 +30,17 @@ function App() {
     loadAccounts();
   }, []);
 
-  // Load products when account or date changes
+  // Load products when account, date, or page changes
   useEffect(() => {
     if (section === 'products') {
       loadProducts();
     }
-  }, [selectedAccountId, dateRange, section]);
+  }, [selectedAccountId, dateRange, pagination.page, section]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setPagination(prev => ({ ...prev, page: 1 }));
+  }, [selectedAccountId, dateRange]);
 
   async function loadAccounts() {
     try {
@@ -52,6 +59,7 @@ function App() {
   async function loadProducts() {
     if (!selectedAccountId) {
       setProducts([]);
+      setSummary(null);
       setLoading(false);
       return;
     }
@@ -61,10 +69,18 @@ function App() {
         accountId: selectedAccountId,
         dateFrom: dateRange.from,
         dateTo: dateRange.to,
+        page: pagination.page,
       });
       setProducts(result.data || []);
+      setSummary(result.summary || null);
+      setPagination(prev => ({
+        ...prev,
+        total: result.pagination?.total || 0,
+        limit: result.pagination?.limit || 50,
+      }));
     } catch {
       setProducts([]);
+      setSummary(null);
     } finally {
       setLoading(false);
     }
@@ -108,11 +124,13 @@ function App() {
 
   function renderContent() {
     switch (section) {
-      case 'products':
+      case 'products': {
+        const totalPages = Math.ceil(pagination.total / pagination.limit) || 1;
         return (
           <>
             <DashboardHeader
               products={filteredProducts}
+              summary={summary}
               dateRange={dateRange}
               onDateChange={setDateRange}
               selectedMarketplace={selectedMarketplace}
@@ -124,10 +142,32 @@ function App() {
                 <p>Caricamento prodotti...</p>
               </div>
             ) : (
-              <ProductTable products={filteredProducts} />
+              <>
+                <ProductTable products={filteredProducts} />
+                {totalPages > 1 && (
+                  <div className="pagination-controls">
+                    <button
+                      disabled={pagination.page <= 1}
+                      onClick={() => setPagination(prev => ({ ...prev, page: prev.page - 1 }))}
+                    >
+                      &larr; Precedente
+                    </button>
+                    <span className="pagination-info">
+                      Pagina {pagination.page} di {totalPages} ({pagination.total} prodotti)
+                    </span>
+                    <button
+                      disabled={pagination.page >= totalPages}
+                      onClick={() => setPagination(prev => ({ ...prev, page: prev.page + 1 }))}
+                    >
+                      Successiva &rarr;
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </>
         );
+      }
       case 'alerts':
         return <AlertsPage accountId={selectedAccountId} />;
       case 'costs':
@@ -143,6 +183,7 @@ function App() {
           <>
             <DashboardHeader
               products={filteredProducts}
+              summary={summary}
               dateRange={dateRange}
               onDateChange={setDateRange}
               selectedMarketplace={selectedMarketplace}

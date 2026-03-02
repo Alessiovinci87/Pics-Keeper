@@ -93,7 +93,7 @@ router.get('/products', validate({ query: ['accountId'] }), async (req, res, nex
 
     const whereClause = conditions.join(' AND ');
 
-    const [productsResult, countResult] = await Promise.all([
+    const [productsResult, countResult, summaryResult] = await Promise.all([
       db.query(
         `SELECT
           adm.asin,
@@ -127,6 +127,20 @@ router.get('/products', validate({ query: ['accountId'] }), async (req, res, nex
       ),
       db.query(
         `SELECT COUNT(DISTINCT adm.asin) FROM asin_daily_metrics adm WHERE ${whereClause}`,
+        params
+      ),
+      db.query(
+        `SELECT
+          COALESCE(SUM(adm.units_sold), 0) AS units_sold,
+          COALESCE(SUM(adm.orders_count), 0) AS orders_count,
+          COALESCE(SUM(adm.revenue), 0) AS revenue,
+          COALESCE(SUM(adm.total_amazon_fees), 0) AS total_amazon_fees,
+          COALESCE(SUM(adm.refunds), 0) AS refunds,
+          COALESCE(SUM(adm.ads_spend), 0) AS ads_spend,
+          COALESCE(SUM(adm.total_product_costs), 0) AS total_product_costs,
+          COALESCE(SUM(adm.net_profit), 0) AS net_profit
+        FROM asin_daily_metrics adm
+        WHERE ${whereClause}`,
         params
       ),
     ]);
@@ -170,11 +184,22 @@ router.get('/products', validate({ query: ['accountId'] }), async (req, res, nex
       }
     }
 
+    const summaryRow = summaryResult.rows[0];
     res.json({
       data: productsResult.rows.map(product => ({
         ...product,
         marketplaces: marketplaceBreakdown[product.asin] || [],
       })),
+      summary: {
+        revenue: parseFloat(summaryRow.revenue),
+        units_sold: parseInt(summaryRow.units_sold, 10),
+        orders_count: parseInt(summaryRow.orders_count, 10),
+        total_amazon_fees: parseFloat(summaryRow.total_amazon_fees),
+        refunds: parseFloat(summaryRow.refunds),
+        ads_spend: parseFloat(summaryRow.ads_spend),
+        total_product_costs: parseFloat(summaryRow.total_product_costs),
+        net_profit: parseFloat(summaryRow.net_profit),
+      },
       pagination: {
         page,
         limit,

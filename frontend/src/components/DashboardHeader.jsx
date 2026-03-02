@@ -16,9 +16,10 @@ const MARKETPLACE_OPTIONS = [
   { code: 'CA', label: 'Canada' },
 ];
 
-export default function DashboardHeader({ products, dateRange, onDateChange, selectedMarketplace, onMarketplaceChange }) {
-  // Compute summary from all products
-  const summary = products.reduce(
+export default function DashboardHeader({ products, summary: backendSummary, dateRange, onDateChange, selectedMarketplace, onMarketplaceChange }) {
+  // When a marketplace filter is active, compute from the filtered products (client-side).
+  // Otherwise use the backend summary which covers ALL ASINs (not just the current page).
+  const clientSummary = products.reduce(
     (acc, p) => ({
       revenue: acc.revenue + Number(p.revenue),
       units: acc.units + Number(p.units_sold),
@@ -31,6 +32,19 @@ export default function DashboardHeader({ products, dateRange, onDateChange, sel
     }),
     { revenue: 0, units: 0, orders: 0, profit: 0, ads: 0, fees: 0, costs: 0, refunds: 0 }
   );
+
+  const summary = (!selectedMarketplace && backendSummary)
+    ? {
+        revenue: backendSummary.revenue,
+        units: backendSummary.units_sold,
+        orders: backendSummary.orders_count,
+        profit: backendSummary.net_profit,
+        ads: backendSummary.ads_spend,
+        fees: backendSummary.total_amazon_fees,
+        costs: backendSummary.total_product_costs,
+        refunds: backendSummary.refunds,
+      }
+    : clientSummary;
 
   const margin = summary.revenue > 0 ? (summary.profit / summary.revenue) * 100 : 0;
   const tacos = summary.revenue > 0 ? (summary.ads / summary.revenue) * 100 : 0;
