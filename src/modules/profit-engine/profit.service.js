@@ -181,14 +181,25 @@ const ProfitService = {
    * which were previously being counted as "otherFees" and inflating costs.
    */
   async buildFeeMap(accountId, marketplaceId, dateFrom, dateTo) {
+    // JOIN with orders_raw to resolve SellerSKU → ASIN.
+    // SP-API financial events often store SellerSKU (e.g. "68-YM50-I8G3")
+    // instead of ASIN (e.g. "B0BY9Q4KTT"). Without this resolution,
+    // the fee lookup key won't match the order's ASIN.
     const result = await db.query(
-      `SELECT amazon_order_id, asin, fee_type, SUM(amount) AS total_amount
-       FROM financial_events_raw
-       WHERE account_id = $1 AND marketplace_id = $2
-         AND event_date >= $3 AND event_date < $4
-         AND event_type = 'ShipmentEvent'
-         AND amount < 0
-       GROUP BY amazon_order_id, asin, fee_type`,
+      `SELECT fe.amazon_order_id,
+              COALESCE(o.asin, fe.asin) AS asin,
+              fe.fee_type,
+              SUM(fe.amount) AS total_amount
+       FROM financial_events_raw fe
+       LEFT JOIN orders_raw o
+         ON o.amazon_order_id = fe.amazon_order_id
+         AND o.account_id = fe.account_id
+         AND (o.asin = fe.asin OR o.sku = fe.asin)
+       WHERE fe.account_id = $1 AND fe.marketplace_id = $2
+         AND fe.event_date >= $3 AND fe.event_date < $4
+         AND fe.event_type = 'ShipmentEvent'
+         AND fe.amount < 0
+       GROUP BY fe.amazon_order_id, COALESCE(o.asin, fe.asin), fe.fee_type`,
       [accountId, marketplaceId, dateFrom, dateTo]
     );
 
