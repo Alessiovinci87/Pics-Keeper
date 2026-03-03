@@ -1,4 +1,7 @@
 const axios = require('axios');
+const zlib = require('zlib');
+const { promisify } = require('util');
+const gunzip = promisify(zlib.gunzip);
 const db = require('../../database/pool');
 const logger = require('../../utils/logger');
 const { sleep } = require('../../utils/helpers');
@@ -118,19 +121,35 @@ const BusinessReportsService = {
   },
 
   /**
-   * Download and parse the report (JSON format).
+   * Download and parse the report (JSON format, possibly gzip-compressed).
    */
   async downloadReport(spApi, reportDocumentId) {
     const doc = await spApi.getReportDocument(reportDocumentId);
-    const response = await axios.get(doc.url, { responseType: 'text' });
+    const isGzipped = doc.compressionAlgorithm === 'GZIP';
+
+    // Download as arraybuffer to handle gzip properly
+    const response = await axios.get(doc.url, {
+      responseType: isGzipped ? 'arraybuffer' : 'text',
+    });
+
+    let jsonStr;
+    if (isGzipped) {
+      const decompressed = await gunzip(Buffer.from(response.data));
+      jsonStr = decompressed.toString('utf-8');
+    } else {
+      jsonStr = response.data;
+    }
 
     try {
-      const parsed = JSON.parse(response.data);
+      const parsed = JSON.parse(jsonStr);
       // GET_SALES_AND_TRAFFIC_REPORT returns:
       // { salesAndTrafficByAsin: [ { date, childAsin, ... } ] }
       return parsed.salesAndTrafficByAsin || [];
     } catch (err) {
-      logger.error('Failed to parse business report JSON', { error: err.message });
+      logger.error('Failed to parse business report JSON', {
+        error: err.message,
+        preview: jsonStr.substring(0, 200),
+      });
       throw new Error('Business report parse error: ' + err.message);
     }
   },
