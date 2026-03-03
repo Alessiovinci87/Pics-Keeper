@@ -10,13 +10,17 @@
 require('dotenv').config();
 const db = require('../src/database/pool');
 
-const ASIN = process.argv[2];
-const dateFrom = process.argv[3];
-const dateTo = process.argv[4];
-const countryFilter = process.argv[5] ? process.argv[5].toUpperCase() : null;
+const args = process.argv.slice(2);
+const shortMode = args.includes('--short');
+const positional = args.filter(a => !a.startsWith('--'));
+
+const ASIN = positional[0];
+const dateFrom = positional[1];
+const dateTo = positional[2];
+const countryFilter = positional[3] ? positional[3].toUpperCase() : null;
 
 if (!ASIN || !dateFrom || !dateTo) {
-  console.log('Usage: node scripts/units-sold-range.js <ASIN> <YYYY-MM-DD from> <YYYY-MM-DD to> [COUNTRY]');
+  console.log('Usage: node scripts/units-sold-range.js <ASIN> <YYYY-MM-DD from> <YYYY-MM-DD to> [COUNTRY] [--short]');
   process.exit(1);
 }
 
@@ -79,6 +83,7 @@ const TZ_CASE = `
     console.log(`  ${'-'.repeat(30)}`);
     console.log(`  ${'TOT'.padEnd(5)} | ${String(totOrd).padStart(6)} | ${String(totUni).padStart(5)}`);
 
+    if (!shortMode) {
     // ── 2. Dettaglio per status ──
     const byStatus = await db.query(`
       SELECT
@@ -198,10 +203,9 @@ const TZ_CASE = `
     const totalDiffStr = totalDiff !== 0 ? ` (diff: ${totalDiff > 0 ? '+' : ''}${totalDiff})` : '';
     console.log(`  ${'TOT'.padEnd(5)} | ${String(totOrd).padStart(3)}/${String(totUni).padStart(3)} unità   | ${String(noTzTotOrd).padStart(3)}/${String(noTzTotUni).padStart(3)} unità${totalDiffStr}`);
 
-    console.log(`\n${'═'.repeat(70)}`);
-    console.log(`  Nota: Seller Central usa il timezone del marketplace.`);
-    console.log(`  Il dato "Con TZ" dovrebbe corrispondere a Seller Central.`);
-    console.log(`${'═'.repeat(70)}\n`);
+    } // end !shortMode
+
+    console.log(`\n${'═'.repeat(70)}\n`);
 
     await db.shutdown();
   } catch (err) {
