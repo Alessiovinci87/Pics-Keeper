@@ -3,6 +3,7 @@ const scheduler = require('../jobs/scheduler');
 const SyncLogger = require('../services/sync-logger');
 const AccountService = require('../modules/accounts/account.service');
 const OrdersService = require('../modules/orders/orders.service');
+const OrdersReconciliationService = require('../modules/orders/orders-reconciliation.service');
 const logger = require('../utils/logger');
 const validate = require('../middleware/validate');
 
@@ -54,6 +55,77 @@ router.post('/trigger/orders/:countryCode', async (req, res, next) => {
 });
 
 /**
+ * POST /api/sync/reconcile/orders/:countryCode
+ * Run orders reconciliation (Reports API) for a single marketplace.
+ * Body: { dateFrom: "2026-02-01", dateTo: "2026-03-02" }
+ */
+router.post('/reconcile/orders/:countryCode', async (req, res, next) => {
+  try {
+    const countryCode = req.params.countryCode.toUpperCase();
+    const { dateFrom, dateTo } = req.body || {};
+
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({
+        error: { message: 'dateFrom and dateTo are required (YYYY-MM-DD)' },
+      });
+    }
+
+    const targets = await AccountService.getActiveSyncTargets();
+    const target = targets.find((t) => t.country_code === countryCode);
+
+    if (!target) {
+      return res.status(404).json({
+        error: { message: `No active marketplace found for country code: ${countryCode}` },
+      });
+    }
+
+    // Run async
+    OrdersReconciliationService.reconcile(target, { dateFrom, dateTo }).catch((err) => {
+      logger.error('Manual orders reconciliation failed', {
+        marketplace: countryCode,
+        error: err.message,
+      });
+    });
+
+    res.json({
+      success: true,
+      message: `Orders reconciliation started for ${countryCode} (${dateFrom} → ${dateTo})`,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/sync/reconcile/orders
+ * Run orders reconciliation for ALL active marketplaces.
+ * Body: { dateFrom: "2026-02-01", dateTo: "2026-03-02" }
+ */
+router.post('/reconcile/orders', async (req, res, next) => {
+  try {
+    const { dateFrom, dateTo } = req.body || {};
+
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({
+        error: { message: 'dateFrom and dateTo are required (YYYY-MM-DD)' },
+      });
+    }
+
+    // Run via the scheduled job which handles all targets
+    scheduler.reconcileOrdersJob({ dateFrom, dateTo }).catch((err) => {
+      logger.error('Manual orders reconciliation (all) failed', { error: err.message });
+    });
+
+    res.json({
+      success: true,
+      message: `Orders reconciliation started for all marketplaces (${dateFrom} → ${dateTo})`,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * POST /api/sync/trigger/:jobType
  * Manually trigger a sync job.
  * jobType: orders | financial | ads | compute | alerts
@@ -66,6 +138,7 @@ router.post('/trigger/:jobType', async (req, res, next) => {
       ads: scheduler.syncAdsJob,
       compute: scheduler.computeAndAggregateJob,
       alerts: scheduler.alertsJob,
+      reconcile: scheduler.reconcileOrdersJob,
     };
 
     const job = jobMap[req.params.jobType];

@@ -8,6 +8,7 @@ const AdsService = require('../modules/ads/ads.service');
 const ProfitService = require('../modules/profit-engine/profit.service');
 const AggregationService = require('../modules/aggregation/aggregation.service');
 const AlertsService = require('../modules/alerts/alerts.service');
+const OrdersReconciliationService = require('../modules/orders/orders-reconciliation.service');
 const { toDateStr } = require('../utils/helpers');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
@@ -150,6 +151,39 @@ async function computeAndAggregateJob(options = {}) {
 }
 
 /**
+ * Run orders reconciliation via Reports API for all active marketplaces.
+ * By default reconciles the last 7 days; accepts optional dateFrom/dateTo.
+ */
+async function reconcileOrdersJob(options = {}) {
+  await withLock('reconcile-orders', async () => {
+    const targets = await AccountService.getActiveSyncTargets();
+    const dateFrom = options.dateFrom || dayjs.utc().subtract(7, 'day').format('YYYY-MM-DD');
+    const dateTo = options.dateTo || dayjs.utc().format('YYYY-MM-DD');
+
+    logger.info('Orders reconciliation job starting', { dateFrom, dateTo });
+
+    for (const target of targets) {
+      try {
+        const result = await OrdersReconciliationService.reconcile(target, { dateFrom, dateTo });
+        logger.info('Orders reconciliation done for target', {
+          marketplace: target.country_code,
+          ...result,
+        });
+      } catch (err) {
+        logger.error('Orders reconciliation failed for target', {
+          accountId: target.account_id,
+          marketplace: target.country_code,
+          error: err.message,
+        });
+      }
+
+      // Pause between marketplaces to avoid rate limits
+      await require('../utils/helpers').sleep(10000);
+    }
+  });
+}
+
+/**
  * Run alert evaluation for all active accounts.
  */
 async function alertsJob() {
@@ -191,6 +225,9 @@ function startScheduler() {
   cron.schedule(config.cron.aggregation, computeAndAggregateJob, { timezone: 'UTC' });
   cron.schedule(config.cron.alerts, alertsJob, { timezone: 'UTC' });
 
+  // Orders reconciliation via Reports API — once a day at 04:00 UTC
+  cron.schedule(config.cron.reconcileOrders || '0 4 * * *', reconcileOrdersJob, { timezone: 'UTC' });
+
   logger.info('Job scheduler started successfully');
 }
 
@@ -212,4 +249,5 @@ module.exports = {
   syncAdsJob,
   computeAndAggregateJob,
   alertsJob,
+  reconcileOrdersJob,
 };

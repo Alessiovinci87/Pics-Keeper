@@ -236,6 +236,43 @@ class SpApiClient {
     return this.request('GET', '/finances/v0/financialEvents', params);
   }
 
+  // -------------------------------------------------------
+  // Reports API v2021-06-30
+  // -------------------------------------------------------
+
+  /**
+   * Create a report request.
+   * @param {string} reportType - e.g. GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL
+   * @param {string[]} marketplaceIds
+   * @param {string} dataStartTime - ISO date
+   * @param {string} dataEndTime - ISO date
+   * @returns {{ reportId: string }}
+   */
+  async createReport({ reportType, marketplaceIds, dataStartTime, dataEndTime }) {
+    return this.request('POST', '/reports/2021-06-30/reports', {
+      reportType,
+      marketplaceIds,
+      dataStartTime,
+      dataEndTime,
+    });
+  }
+
+  /**
+   * Get report status by reportId.
+   * @returns {{ processingStatus, reportDocumentId, ... }}
+   */
+  async getReport(reportId) {
+    return this.request('GET', `/reports/2021-06-30/reports/${reportId}`);
+  }
+
+  /**
+   * Get report document download URL.
+   * @returns {{ url, compressionAlgorithm }}
+   */
+  async getReportDocument(reportDocumentId) {
+    return this.request('GET', `/reports/2021-06-30/documents/${reportDocumentId}`);
+  }
+
   /**
    * Get catalog item details (images, title) for an ASIN.
    * Uses Catalog Items API v2022-04-01.
