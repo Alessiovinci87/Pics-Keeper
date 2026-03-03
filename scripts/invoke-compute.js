@@ -6,20 +6,28 @@
  *   node scripts/invoke-compute.js [dateFrom] [dateTo]
  *   node scripts/invoke-compute.js 2026-02-01 2026-03-03
  *
+ * dateTo is INCLUSIVE (like Shopkeeper) — internally converted to exclusive
+ * for the pipeline queries (which all use < dateTo).
+ *
  * Processes ALL active marketplaces for the account.
- * Defaults to last 7 days if no dates given.
  */
 require('dotenv').config();
 
 const ProfitService = require('../src/modules/profit-engine/profit.service');
 const AggregationService = require('../src/modules/aggregation/aggregation.service');
 const db = require('../src/database/pool');
+const dayjs = require('dayjs');
 
 const ACCOUNT_ID = 1;
 
 async function main() {
   const dateFrom = process.argv[2] || '2026-02-01';
-  const dateTo = process.argv[3] || '2026-03-03';
+  const dateToInclusive = process.argv[3] || dayjs().format('YYYY-MM-DD');
+  // Add +1 day to make the end date exclusive (matches scheduler behavior)
+  const dateTo = dayjs(dateToInclusive).add(1, 'day').format('YYYY-MM-DD');
+
+  console.log(`\n  User range (inclusive): ${dateFrom} → ${dateToInclusive}`);
+  console.log(`  Pipeline range (exclusive): ${dateFrom} → ${dateTo}`);
 
   // Discover all active marketplaces with data
   const mpResult = await db.query(`
@@ -52,7 +60,7 @@ async function main() {
   }
 
   // Verification query — all marketplaces with data
-  console.log(`=== Verification (${dateFrom} → ${dateTo}) ===\n`);
+  console.log(`=== Verification (${dateFrom} → ${dateToInclusive} inclusive) ===\n`);
   const verification = await db.query(`
     SELECT
       mk.country_code,
