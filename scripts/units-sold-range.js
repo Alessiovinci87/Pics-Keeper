@@ -130,7 +130,9 @@ const TZ_CASE = `
     let currentDay = null;
     let dayTotOrd = 0, dayTotUni = 0;
     for (const r of daily.rows) {
-      const dayStr = r.day.toISOString().slice(0, 10);
+      // Use local date parts to avoid UTC shift (toISOString shifts CET dates back 1 day)
+      const d = r.day;
+      const dayStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       if (currentDay && currentDay !== dayStr) {
         console.log(`  ${' '.repeat(10)} | ${'SUB'.padEnd(5)} | ${String(dayTotOrd).padStart(6)} | ${String(dayTotUni).padStart(5)}`);
         console.log(`  ${'-'.repeat(40)}`);
