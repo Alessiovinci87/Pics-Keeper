@@ -41,6 +41,10 @@ const AggregationService = {
    * Aggregate per-ASIN per-day metrics from order_profit.
    * Includes marketplace_facilitator_tax in total_amazon_fees.
    * Uses LATERAL JOIN for efficient ads lookup.
+   *
+   * INNER JOIN with orders_raw ensures:
+   * - Cancelled orders are always excluded (even if stale in order_profit)
+   * - Quantity uses the authoritative value from orders_raw
    */
   async aggregateAsinDaily(accountId, marketplaceId, dateFrom, dateTo) {
     await db.query(
@@ -55,7 +59,7 @@ const AggregationService = {
         op.marketplace_id,
         op.asin,
         op.order_date AS metric_date,
-        SUM(op.quantity) AS units_sold,
+        SUM(o.quantity) AS units_sold,
         COUNT(DISTINCT op.amazon_order_id) AS orders_count,
         SUM(op.revenue) AS revenue,
         SUM(op.referral_fee + op.fba_fee + op.other_amazon_fees + op.marketplace_facilitator_tax) AS total_amazon_fees,
@@ -82,6 +86,10 @@ const AggregationService = {
         op.currency,
         NOW() AS computed_at
       FROM order_profit op
+      INNER JOIN orders_raw o
+        ON o.account_id = op.account_id
+        AND o.amazon_order_id = op.amazon_order_id
+        AND o.asin = op.asin
       LEFT JOIN LATERAL (
         SELECT
           SUM(spend) AS total_spend,
@@ -96,6 +104,7 @@ const AggregationService = {
         AND op.marketplace_id = $2
         AND op.order_date >= $3
         AND op.order_date < $4
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
       GROUP BY op.account_id, op.marketplace_id, op.asin, op.order_date,
                ads.total_spend, ads.total_sales, op.currency
       ON CONFLICT (account_id, marketplace_id, asin, metric_date) DO UPDATE SET

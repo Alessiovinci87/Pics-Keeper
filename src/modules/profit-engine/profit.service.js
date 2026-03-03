@@ -150,11 +150,15 @@ const ProfitService = {
   },
 
   /**
-   * Remove order_profit records for orders that have been Cancelled.
-   * These records are orphans that inflate metrics.
+   * Cleanup stale order_profit records:
+   * 1. Delete records for orders that have been Cancelled
+   * 2. Sync quantity from orders_raw when it changed (partial cancellation / amendment)
+   *
+   * NOT date-scoped — covers the entire account+marketplace.
    */
   async cleanupCancelledOrders(accountId, marketplaceId) {
-    const result = await db.query(
+    // 1. Delete cancelled orders from order_profit
+    const deleted = await db.query(
       `DELETE FROM order_profit op
        USING orders_raw o
        WHERE op.account_id = o.account_id
@@ -166,9 +170,29 @@ const ProfitService = {
       [accountId, marketplaceId]
     );
 
-    if (result.rowCount > 0) {
+    if (deleted.rowCount > 0) {
       logger.info('Cleaned up cancelled order profits', {
-        accountId, marketplaceId, deleted: result.rowCount,
+        accountId, marketplaceId, deleted: deleted.rowCount,
+      });
+    }
+
+    // 2. Sync stale quantities from orders_raw
+    const synced = await db.query(
+      `UPDATE order_profit op
+       SET quantity = o.quantity, computed_at = NOW()
+       FROM orders_raw o
+       WHERE op.account_id = o.account_id
+         AND op.amazon_order_id = o.amazon_order_id
+         AND op.asin = o.asin
+         AND op.quantity != o.quantity
+         AND op.account_id = $1
+         AND op.marketplace_id = $2`,
+      [accountId, marketplaceId]
+    );
+
+    if (synced.rowCount > 0) {
+      logger.info('Synced stale quantities in order_profit', {
+        accountId, marketplaceId, updated: synced.rowCount,
       });
     }
   },
