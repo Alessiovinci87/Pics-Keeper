@@ -23,8 +23,26 @@ const AggregationService = {
     try {
       logger.info('Starting aggregation', { accountId, marketplaceId, dateFrom, dateTo });
 
+      // Purge stale asin_daily_metrics before re-aggregating.
+      // This ensures ASIN+date combos where all orders are now cancelled
+      // don't retain inflated metrics from a previous aggregation run.
+      await db.query(
+        `DELETE FROM asin_daily_metrics
+         WHERE account_id = $1 AND marketplace_id = $2
+           AND metric_date >= $3 AND metric_date < $4`,
+        [accountId, marketplaceId, dateFrom, dateTo]
+      );
+
       await this.aggregateAsinDaily(accountId, marketplaceId, dateFrom, dateTo);
       await this.aggregateAdsOnlyAsins(accountId, marketplaceId, dateFrom, dateTo);
+      // Purge stale account_daily_kpi before re-aggregating
+      await db.query(
+        `DELETE FROM account_daily_kpi
+         WHERE account_id = $1 AND marketplace_id = $2
+           AND kpi_date >= $3 AND kpi_date < $4`,
+        [accountId, marketplaceId, dateFrom, dateTo]
+      );
+
       await this.aggregateAccountDaily(accountId, marketplaceId, dateFrom, dateTo);
       await this.aggregateAccountDailyTotal(accountId, dateFrom, dateTo);
 
