@@ -61,6 +61,7 @@ async function main() {
         SELECT SUM(brd.units_ordered)
         FROM business_report_daily brd
         WHERE brd.account_id = $1 AND brd.marketplace_id = mk.id
+          AND brd.asin = '_TOTAL'
           AND brd.report_date >= $2::date AND brd.report_date <= $3::date
       ), 0) AS br_units,
       -- Orders API (our current source)
