@@ -75,7 +75,7 @@ async function main() {
   }
 
   console.log('\nDone.');
-  await db.end();
+  await db.shutdown();
 }
 
 main().catch((err) => {
