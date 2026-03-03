@@ -6,6 +6,7 @@
  *   node scripts/invoke-compute.js [dateFrom] [dateTo]
  *   node scripts/invoke-compute.js 2026-02-01 2026-03-03
  *
+ * Processes ALL active marketplaces for the account.
  * Defaults to last 7 days if no dates given.
  */
 require('dotenv').config();
@@ -13,36 +14,44 @@ require('dotenv').config();
 const ProfitService = require('../src/modules/profit-engine/profit.service');
 const AggregationService = require('../src/modules/aggregation/aggregation.service');
 const db = require('../src/database/pool');
-const logger = require('../src/utils/logger');
 
 const ACCOUNT_ID = 1;
-const MARKETPLACE_IDS = [1, 2, 3]; // DE, FR, IT
-const MARKETPLACE_NAMES = { 1: 'DE', 2: 'FR', 3: 'IT' };
 
 async function main() {
   const dateFrom = process.argv[2] || '2026-02-01';
   const dateTo = process.argv[3] || '2026-03-03';
 
-  console.log(`\n=== Compute + Aggregate: ${dateFrom} → ${dateTo} ===\n`);
+  // Discover all active marketplaces with data
+  const mpResult = await db.query(`
+    SELECT DISTINCT mk.id, mk.country_code
+    FROM marketplaces mk
+    JOIN orders_raw o ON o.marketplace_id = mk.id AND o.account_id = $1
+    WHERE o.purchase_date >= $2 AND o.purchase_date < $3
+    ORDER BY mk.id
+  `, [ACCOUNT_ID, dateFrom, dateTo]);
 
-  for (const mpId of MARKETPLACE_IDS) {
-    const name = MARKETPLACE_NAMES[mpId];
-    console.log(`--- ${name} (marketplace_id=${mpId}) ---`);
+  const marketplaces = mpResult.rows;
+
+  console.log(`\n=== Compute + Aggregate: ${dateFrom} → ${dateTo} ===`);
+  console.log(`=== Marketplaces: ${marketplaces.map(m => m.country_code).join(', ')} ===\n`);
+
+  for (const mp of marketplaces) {
+    console.log(`--- ${mp.country_code} (marketplace_id=${mp.id}) ---`);
 
     try {
       console.log(`  [1/2] Profit compute...`);
-      const profitResult = await ProfitService.computeForRange(ACCOUNT_ID, mpId, dateFrom, dateTo);
+      const profitResult = await ProfitService.computeForRange(ACCOUNT_ID, mp.id, dateFrom, dateTo);
       console.log(`  ✓ Profit: ${profitResult.processed} orders processed`);
 
       console.log(`  [2/2] Aggregation...`);
-      await AggregationService.aggregate(ACCOUNT_ID, mpId, dateFrom, dateTo);
+      await AggregationService.aggregate(ACCOUNT_ID, mp.id, dateFrom, dateTo);
       console.log(`  ✓ Aggregation complete\n`);
     } catch (err) {
-      console.error(`  ✗ ${name} failed: ${err.message}\n`);
+      console.error(`  ✗ ${mp.country_code} failed: ${err.message}\n`);
     }
   }
 
-  // Verification query
+  // Verification query — all marketplaces with data
   console.log(`=== Verification (${dateFrom} → ${dateTo}) ===\n`);
   const verification = await db.query(`
     SELECT
@@ -64,7 +73,8 @@ async function main() {
        WHERE ak.account_id = $1 AND ak.marketplace_id = mk.id
        AND ak.kpi_date >= $2 AND ak.kpi_date < $3) AS kpi_units
     FROM marketplaces mk
-    WHERE mk.id IN (1, 2, 3)
+    WHERE mk.id IN (SELECT DISTINCT marketplace_id FROM orders_raw WHERE account_id = $1
+      AND purchase_date >= $2 AND purchase_date < $3)
     ORDER BY mk.country_code
   `, [ACCOUNT_ID, dateFrom, dateTo]);
 
