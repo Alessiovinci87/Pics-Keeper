@@ -26,6 +26,11 @@ const BusinessReportsService = {
 
   /**
    * Sync business report data for a single account+marketplace.
+   *
+   * Amazon's salesAndTrafficByAsin does NOT include a date field —
+   * it aggregates over the full report period.  To get per-day per-ASIN
+   * data (matching Shopkeeper) we request one report per day.
+   *
    * @param {Object} target - from AccountService.getActiveSyncTargets()
    * @param {Object} options
    * @param {string} [options.dateFrom] - YYYY-MM-DD
@@ -38,36 +43,76 @@ const BusinessReportsService = {
       const from = dateFrom || dayjs.utc().subtract(7, 'day').format('YYYY-MM-DD');
       const to = dateTo || dayjs.utc().format('YYYY-MM-DD');
 
+      // Build list of individual days
+      const days = [];
+      let cursor = dayjs.utc(from);
+      const end = dayjs.utc(to);
+      while (cursor.isBefore(end) || cursor.isSame(end, 'day')) {
+        days.push(cursor.format('YYYY-MM-DD'));
+        cursor = cursor.add(1, 'day');
+      }
+
       logger.info('Business reports sync starting', {
         marketplace: target.country_code,
         dateFrom: from,
         dateTo: to,
+        totalDays: days.length,
       });
 
       const spApi = new SpApiClient(target);
+      let totalUpserted = 0;
+      let totalSkipped = 0;
+      let totalErrors = 0;
 
-      // 1. Request report
-      const reportId = await this.requestReport(spApi, target, from, to);
+      for (const day of days) {
+        try {
+          // 1. Request single-day report
+          const reportId = await this.requestReport(spApi, target, day, day);
 
-      // 2. Poll until ready
-      const reportDocumentId = await this.waitForReport(spApi, reportId);
+          // 2. Poll until ready
+          const reportDocumentId = await this.waitForReport(spApi, reportId);
 
-      // 3. Download & parse JSON
-      const reportData = await this.downloadReport(spApi, reportDocumentId);
+          // 3. Download & parse JSON
+          const reportData = await this.downloadReport(spApi, reportDocumentId);
 
-      // 4. Upsert into DB
-      const { upserted, skipped, errors } = await this.upsertData(target, reportData);
+          // 4. Upsert into DB with this day as report_date
+          const { upserted, skipped, errors } = await this.upsertData(target, reportData, day);
 
-      await SyncLogger.complete(syncLog.id, { processed: upserted + skipped, inserted: upserted, updated: 0 });
+          totalUpserted += upserted;
+          totalSkipped += skipped;
+          totalErrors += errors;
+
+          logger.info('Business report day synced', {
+            marketplace: target.country_code,
+            day,
+            upserted,
+            skipped,
+          });
+        } catch (dayErr) {
+          totalErrors++;
+          logger.warn('Business report day failed', {
+            marketplace: target.country_code,
+            day,
+            error: dayErr.message,
+          });
+        }
+      }
+
+      await SyncLogger.complete(syncLog.id, {
+        processed: totalUpserted + totalSkipped,
+        inserted: totalUpserted,
+        updated: 0,
+      });
 
       logger.info('Business reports sync completed', {
         marketplace: target.country_code,
-        upserted,
-        skipped,
-        errors,
+        totalDays: days.length,
+        upserted: totalUpserted,
+        skipped: totalSkipped,
+        errors: totalErrors,
       });
 
-      return { upserted, skipped, errors };
+      return { upserted: totalUpserted, skipped: totalSkipped, errors: totalErrors };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
       logger.error('Business reports sync failed', {
@@ -142,8 +187,8 @@ const BusinessReportsService = {
 
     try {
       const parsed = JSON.parse(jsonStr);
-      // GET_SALES_AND_TRAFFIC_REPORT returns:
-      // { salesAndTrafficByAsin: [ { date, childAsin, ... } ] }
+      // salesAndTrafficByAsin contains per-ASIN aggregated data
+      // (no date field — date comes from the single-day report request)
       return parsed.salesAndTrafficByAsin || [];
     } catch (err) {
       logger.error('Failed to parse business report JSON', {
@@ -156,17 +201,19 @@ const BusinessReportsService = {
 
   /**
    * Upsert report rows into business_report_daily.
+   * @param {Object} target
+   * @param {Array} rows - salesAndTrafficByAsin entries
+   * @param {string} reportDate - YYYY-MM-DD date for these rows
    */
-  async upsertData(target, rows) {
+  async upsertData(target, rows, reportDate) {
     let upserted = 0;
     let skipped = 0;
     let errors = 0;
 
     for (const row of rows) {
       try {
-        const date = row.date;
         const asin = row.childAsin || row.parentAsin;
-        if (!date || !asin) {
+        if (!asin) {
           skipped++;
           continue;
         }
@@ -210,7 +257,7 @@ const BusinessReportsService = {
         `, [
           target.account_id,
           target.account_marketplace_id,
-          date,
+          reportDate,
           asin,
           row.sku || null,
           sales.unitsOrdered || 0,
@@ -232,7 +279,7 @@ const BusinessReportsService = {
       } catch (err) {
         errors++;
         logger.warn('Business report upsert failed', {
-          date: row.date,
+          date: reportDate,
           asin: row.childAsin,
           error: err.message,
         });
