@@ -246,15 +246,13 @@ class SpApiClient {
    * @param {string[]} marketplaceIds
    * @param {string} dataStartTime - ISO date
    * @param {string} dataEndTime - ISO date
+   * @param {Object} [reportOptions] - e.g. { dateGranularity: 'DAY', asinGranularity: 'CHILD' }
    * @returns {{ reportId: string }}
    */
-  async createReport({ reportType, marketplaceIds, dataStartTime, dataEndTime }) {
-    return this.request('POST', '/reports/2021-06-30/reports', {
-      reportType,
-      marketplaceIds,
-      dataStartTime,
-      dataEndTime,
-    });
+  async createReport({ reportType, marketplaceIds, dataStartTime, dataEndTime, reportOptions }) {
+    const body = { reportType, marketplaceIds, dataStartTime, dataEndTime };
+    if (reportOptions) body.reportOptions = reportOptions;
+    return this.request('POST', '/reports/2021-06-30/reports', body);
   }
 
   /**

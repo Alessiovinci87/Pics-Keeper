@@ -31,6 +31,7 @@ const config = {
     aggregation: process.env.AGGREGATION_CRON || '*/20 * * * *',
     alerts: process.env.ALERTS_CRON || '0 * * * *',
     reconcileOrders: process.env.RECONCILE_ORDERS_CRON || '0 4 * * *',
+    syncBusinessReports: process.env.SYNC_BUSINESS_REPORTS_CRON || '0 6 * * *',
   },
 
   logLevel: process.env.LOG_LEVEL || 'info',
