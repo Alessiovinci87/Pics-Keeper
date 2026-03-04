@@ -195,7 +195,7 @@ const ReconciliationService = {
       WHERE account_id = $1
         AND marketplace_id = $2
         AND (purchase_date AT TIME ZONE $3)::date = $4
-        AND order_status NOT IN ('Cancelled', 'Pending')`,
+        AND UPPER(order_status) != 'CANCELLED'`,
       [accountId, marketplaceId, tz, reportDate]
     );
 

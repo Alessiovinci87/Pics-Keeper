@@ -49,7 +49,7 @@ FROM orders_raw
 WHERE marketplace_id = 3
   AND purchase_date >= '2026-02-22'
   AND purchase_date < '2026-03-01'
-  AND order_status NOT IN ('Cancelled', 'Pending');
+  AND UPPER(order_status) != 'CANCELLED';
 
 -- ============================================================
 -- STEP 4: Daily breakdown (excluding Cancelled/Pending)
@@ -66,7 +66,7 @@ FROM orders_raw
 WHERE marketplace_id = 3
   AND purchase_date >= '2026-02-22'
   AND purchase_date < '2026-03-01'
-  AND order_status NOT IN ('Cancelled', 'Pending')
+  AND UPPER(order_status) != 'CANCELLED'
 GROUP BY purchase_date::date
 ORDER BY order_date;
 
@@ -96,7 +96,7 @@ WHERE marketplace_id = 3
     -- Orders on 01/03 UTC that are still 28/02 in CET
     (purchase_date >= '2026-03-01 00:00:00+00' AND purchase_date < '2026-03-01 01:00:00+00')
   )
-  AND order_status NOT IN ('Cancelled', 'Pending')
+  AND UPPER(order_status) != 'CANCELLED'
 ORDER BY purchase_date;
 
 -- ============================================================
@@ -112,7 +112,7 @@ FROM orders_raw
 WHERE marketplace_id = 3
   AND purchase_date AT TIME ZONE 'Europe/Rome' >= '2026-02-22'
   AND purchase_date AT TIME ZONE 'Europe/Rome' < '2026-03-01'
-  AND order_status NOT IN ('Cancelled', 'Pending')
+  AND UPPER(order_status) != 'CANCELLED'
 GROUP BY (purchase_date AT TIME ZONE 'Europe/Rome')::date
 ORDER BY local_date;
 
@@ -149,7 +149,7 @@ FROM orders_raw
 WHERE marketplace_id = 3
   AND purchase_date >= '2026-02-22'
   AND purchase_date < '2026-03-01'
-  AND order_status NOT IN ('Cancelled', 'Pending')
+  AND UPPER(order_status) != 'CANCELLED'
 GROUP BY
   raw_data->'order'->>'ShipCountry',
   raw_data->'order'->'ShippingAddress'->>'CountryCode',

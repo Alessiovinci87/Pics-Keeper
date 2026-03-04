@@ -93,6 +93,6 @@ LEFT JOIN LATERAL (
                 ELSE 'Europe/Rome'
             END
           )::date = br.report_date
-      AND o.order_status NOT IN ('Cancelled', 'Pending')
+      AND UPPER(o.order_status) != 'CANCELLED'
 ) ord ON TRUE
 ORDER BY br.report_date, m.country_code;

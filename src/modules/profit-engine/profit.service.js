@@ -41,7 +41,7 @@ const ProfitService = {
         `SELECT * FROM orders_raw
          WHERE account_id = $1 AND marketplace_id = $2
            AND purchase_date >= $3 AND purchase_date < $4
-           AND order_status NOT IN ('Cancelled', 'Pending')
+           AND UPPER(order_status) != 'CANCELLED'
          ORDER BY purchase_date`,
         [accountId, marketplaceId, dateFrom, dateTo]
       );
@@ -128,7 +128,7 @@ const ProfitService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND order_status NOT IN ('Cancelled', 'Pending')
+         AND UPPER(order_status) != 'CANCELLED'
        GROUP BY asin, purchase_date::date`,
       [accountId, marketplaceId, dateFrom, dateTo]
     );
@@ -154,7 +154,7 @@ const ProfitService = {
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= DATE_TRUNC('month', $3::date)
          AND purchase_date < DATE_TRUNC('month', $4::date) + INTERVAL '1 month'
-         AND order_status NOT IN ('Cancelled', 'Pending')
+         AND UPPER(order_status) != 'CANCELLED'
        GROUP BY asin, DATE_TRUNC('month', purchase_date)`,
       [accountId, marketplaceId, dateFrom, dateTo]
     );
