@@ -18,7 +18,6 @@ require('dotenv').config();
 const db = require('../src/database/pool');
 const AccountService = require('../src/modules/accounts/account.service');
 const BusinessReportsService = require('../src/modules/business-reports/business-reports.service');
-const dayjs = require('dayjs');
 
 const ACCOUNT_ID = 1;
 
@@ -51,8 +50,6 @@ async function main() {
   // Step 2: Compare
   console.log(`\n--- Step 2: Comparison ---\n`);
 
-  const dateToExclusive = dayjs(dateTo).add(1, 'day').format('YYYY-MM-DD');
-
   const comparison = await db.query(`
     SELECT
       mk.country_code,
@@ -64,13 +61,44 @@ async function main() {
           AND brd.asin = '_TOTAL'
           AND brd.report_date >= $2::date AND brd.report_date <= $3::date
       ), 0) AS br_units,
-      -- Orders API (our current source)
+      -- Orders API (timezone-aware to match Business Reports local dates)
       COALESCE((
         SELECT SUM(o.quantity)
         FROM orders_raw o
         WHERE o.account_id = $1 AND o.marketplace_id = mk.id
           AND UPPER(o.order_status) NOT IN ('CANCELLED','CANCELED')
-          AND o.purchase_date >= $2 AND o.purchase_date < $4
+          AND (o.purchase_date AT TIME ZONE
+            CASE mk.country_code
+              WHEN 'IT' THEN 'Europe/Rome'
+              WHEN 'DE' THEN 'Europe/Berlin'
+              WHEN 'FR' THEN 'Europe/Paris'
+              WHEN 'ES' THEN 'Europe/Madrid'
+              WHEN 'GB' THEN 'Europe/London'
+              WHEN 'NL' THEN 'Europe/Amsterdam'
+              WHEN 'SE' THEN 'Europe/Stockholm'
+              WHEN 'PL' THEN 'Europe/Warsaw'
+              WHEN 'TR' THEN 'Europe/Istanbul'
+              WHEN 'BE' THEN 'Europe/Brussels'
+              WHEN 'US' THEN 'America/Los_Angeles'
+              WHEN 'CA' THEN 'America/Toronto'
+              ELSE 'UTC'
+            END)::date >= $2::date
+          AND (o.purchase_date AT TIME ZONE
+            CASE mk.country_code
+              WHEN 'IT' THEN 'Europe/Rome'
+              WHEN 'DE' THEN 'Europe/Berlin'
+              WHEN 'FR' THEN 'Europe/Paris'
+              WHEN 'ES' THEN 'Europe/Madrid'
+              WHEN 'GB' THEN 'Europe/London'
+              WHEN 'NL' THEN 'Europe/Amsterdam'
+              WHEN 'SE' THEN 'Europe/Stockholm'
+              WHEN 'PL' THEN 'Europe/Warsaw'
+              WHEN 'TR' THEN 'Europe/Istanbul'
+              WHEN 'BE' THEN 'Europe/Brussels'
+              WHEN 'US' THEN 'America/Los_Angeles'
+              WHEN 'CA' THEN 'America/Toronto'
+              ELSE 'UTC'
+            END)::date <= $3::date
       ), 0) AS orders_api_units
     FROM marketplaces mk
     WHERE mk.id IN (
@@ -78,10 +106,12 @@ async function main() {
       WHERE account_id = $1 AND report_date >= $2::date AND report_date <= $3::date
       UNION
       SELECT DISTINCT marketplace_id FROM orders_raw
-      WHERE account_id = $1 AND purchase_date >= $2 AND purchase_date < $4
+      WHERE account_id = $1
+        AND (purchase_date AT TIME ZONE 'UTC')::date >= ($2::date - 1)
+        AND (purchase_date AT TIME ZONE 'UTC')::date <= ($3::date + 1)
     )
     ORDER BY mk.country_code
-  `, [ACCOUNT_ID, dateFrom, dateTo, dateToExclusive]);
+  `, [ACCOUNT_ID, dateFrom, dateTo]);
 
   let totalBr = 0;
   let totalOrders = 0;
@@ -105,8 +135,8 @@ async function main() {
   console.log(`  TOTAL   | ${String(totalBr).padStart(22)} | ${String(totalOrders).padStart(10)} | ${totalDelta > 0 ? ` +${totalDelta}` : ` ${totalDelta}`}`);
 
   console.log(`\n  BR_units = dato Business Reports (stessa fonte di Shopkeeper)`);
-  console.log(`  Orders_API = SUM(quantity) da orders_raw (nostra sync attuale)`);
-  console.log(`  Se BR_units = Shopkeeper → match perfetto!\n`);
+  console.log(`  Orders_API = SUM(quantity) da orders_raw (timezone-aware, local marketplace dates)`);
+  console.log(`  Entrambi usano le date locali del marketplace (es. Europe/Rome per IT)\n`);
 
   console.log('Done.');
   await db.shutdown();
