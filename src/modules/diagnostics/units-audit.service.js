@@ -87,7 +87,7 @@ const UnitsAuditService = {
        WHERE account_id = $1 AND marketplace_id = $2
          AND (purchase_date AT TIME ZONE $5)::date >= $3::date
          AND (purchase_date AT TIME ZONE $5)::date < $4::date
-         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
          ${asinFilter}`,
       params
     );
@@ -116,7 +116,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
          ${asinFilter}`,
       params
     );
@@ -268,7 +268,7 @@ const UnitsAuditService = {
        FROM orders_raw o
        WHERE o.account_id = $1 AND o.marketplace_id = $2
          AND o.purchase_date >= $3 AND o.purchase_date < $4
-         AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+         AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
          ${asinFilter}
          AND NOT EXISTS (
            SELECT 1 FROM order_profit op
@@ -291,7 +291,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
          AND purchase_date::date != (purchase_date AT TIME ZONE $5)::date`,
       [accountId, marketplaceId, dateFrom, dateTo, tz]
     );
@@ -317,7 +317,7 @@ const UnitsAuditService = {
        FROM orders_raw
        WHERE account_id = $1 AND marketplace_id = $2
          AND purchase_date >= $3 AND purchase_date < $4
-         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
        ORDER BY purchase_date`,
       [accountId, marketplaceId, date, nextDateStr, tz]
     );

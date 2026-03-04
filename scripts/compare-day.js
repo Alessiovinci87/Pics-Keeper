@@ -32,7 +32,7 @@ async function main() {
         SELECT SUM(o.quantity)
         FROM orders_raw o
         WHERE o.account_id = $1 AND o.marketplace_id = mk.id
-          AND UPPER(o.order_status) NOT IN ('CANCELLED','CANCELED','PENDING')
+          AND UPPER(o.order_status) NOT IN ('CANCELLED','CANCELED')
           AND o.purchase_date >= $2 AND o.purchase_date < $3
       ), 0) AS orders_api_units
     FROM marketplaces mk

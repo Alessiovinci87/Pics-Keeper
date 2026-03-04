@@ -266,7 +266,7 @@ router.get(
          WHERE account_id = $1 AND marketplace_id = $2
            AND (purchase_date AT TIME ZONE $5)::date >= $3::date
            AND (purchase_date AT TIME ZONE $5)::date < $4::date
-           AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+           AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
            ${asinFilter}
          ORDER BY purchase_date`,
         dbParams

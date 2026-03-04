@@ -55,7 +55,7 @@ const countryFilter = process.argv[5] ? process.argv[5].toUpperCase() : null;
           AND o.asin = $1
           AND o.purchase_date >= $2
           AND o.purchase_date < $3
-          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
       ) raw ON TRUE
       LEFT JOIN LATERAL (
         SELECT
@@ -174,7 +174,7 @@ const countryFilter = process.argv[5] ? process.argv[5].toUpperCase() : null;
         AND o.asin = $1
         AND o.purchase_date >= $2
         AND o.purchase_date < $3
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
       GROUP BY m.country_code
       ORDER BY days_with_orders DESC
     `, [asin, dateFrom, dateTo]);
@@ -196,7 +196,7 @@ const countryFilter = process.argv[5] ? process.argv[5].toUpperCase() : null;
         AND o.asin = $1
         AND o.purchase_date >= $2
         AND o.purchase_date < $3
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
         AND op.id IS NULL
       GROUP BY m.country_code
       HAVING COUNT(DISTINCT o.amazon_order_id) > 0
@@ -222,7 +222,7 @@ const countryFilter = process.argv[5] ? process.argv[5].toUpperCase() : null;
       JOIN marketplaces m ON m.id = o.marketplace_id
       WHERE o.account_id = 1
         AND o.asin = $1
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
         AND (
           -- Orders on Jan 31 UTC that might be Feb 1 local time
           (o.purchase_date >= ($2::date - interval '1 day') AND o.purchase_date < $2::timestamptz

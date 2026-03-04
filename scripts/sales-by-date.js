@@ -50,7 +50,7 @@ const targetDate = dateArg || new Date(Date.now() - 86400000).toISOString().slic
             WHEN 'CA' THEN 'America/Toronto'
             ELSE 'UTC'
           END, 'UTC'))::date = $1::date
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
       GROUP BY m.country_code, m.name, o.currency
       ORDER BY gross_revenue DESC`,
       [targetDate]
@@ -110,7 +110,7 @@ const targetDate = dateArg || new Date(Date.now() - 86400000).toISOString().slic
               WHEN 'CA' THEN 'America/Toronto'
               ELSE 'UTC'
             END, 'UTC'))::date = $1::date
-          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
+          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
         GROUP BY o.asin, a.title, a.sku, m.country_code, o.currency
         ORDER BY units_sold DESC
         LIMIT 30`,

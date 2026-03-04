@@ -58,7 +58,7 @@ async function main() {
       SELECT COALESCE(SUM(quantity), 0) AS units
       FROM orders_raw
       WHERE account_id = $1 AND marketplace_id = $2
-        AND UPPER(order_status) NOT IN ('CANCELLED','CANCELED','PENDING')
+        AND UPPER(order_status) NOT IN ('CANCELLED','CANCELED')
         AND purchase_date >= $3 AND purchase_date < $4
     `, [ACCOUNT_ID, mp.id, dateFrom, dateToExclusive]);
 
@@ -67,7 +67,7 @@ async function main() {
       SELECT COALESCE(SUM(quantity), 0) AS units
       FROM orders_raw
       WHERE account_id = $1 AND marketplace_id = $2
-        AND UPPER(order_status) NOT IN ('CANCELLED','CANCELED','PENDING')
+        AND UPPER(order_status) NOT IN ('CANCELLED','CANCELED')
         AND (purchase_date AT TIME ZONE $5)::date >= $3::date
         AND (purchase_date AT TIME ZONE $5)::date < $4::date
     `, [ACCOUNT_ID, mp.id, dateFrom, dateToExclusive, tz]);
@@ -95,7 +95,7 @@ async function main() {
         (purchase_date AT TIME ZONE $5)::date AS local_date
       FROM orders_raw
       WHERE account_id = $1 AND marketplace_id = $2
-        AND UPPER(order_status) NOT IN ('CANCELLED','CANCELED','PENDING')
+        AND UPPER(order_status) NOT IN ('CANCELLED','CANCELED')
         AND purchase_date::date != (purchase_date AT TIME ZONE $5)::date
         AND (
           -- Orders near the start boundary
