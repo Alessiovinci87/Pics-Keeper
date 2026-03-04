@@ -1,0 +1,26 @@
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.summary-card {
+  background: #1e2028;
+  border: 1px solid #2d2f3a;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.sc-label {
+  color: #8a8d9a;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.sc-value {
+  font-size: 20px;
+  font-weight: 600;
+}

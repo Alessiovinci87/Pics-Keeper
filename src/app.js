@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -40,6 +41,17 @@ app.use((req, _res, next) => {
 
 // API routes
 app.use('/api', routes);
+
+// Serve React frontend (production build)
+const clientDist = path.join(__dirname, '..', 'client', 'dist');
+app.use(express.static(clientDist));
+app.get('*', (_req, res, next) => {
+  // Only serve index.html for non-API routes
+  if (_req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(clientDist, 'index.html'), (err) => {
+    if (err) next();
+  });
+});
 
 // 404 handler
 app.use((_req, res) => {
