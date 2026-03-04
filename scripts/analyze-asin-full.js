@@ -157,7 +157,7 @@ function pad(v, w) { return String(v).padStart(w); }
           FROM orders_raw o
           WHERE o.account_id = 1 AND o.marketplace_id = m.id AND o.asin = $1
             AND o.purchase_date >= $2::timestamptz AND o.purchase_date < $3::timestamptz
-            AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+            AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
         ) raw_data ON TRUE
         LEFT JOIN LATERAL (
           SELECT
@@ -484,7 +484,7 @@ function pad(v, w) { return String(v).padStart(w); }
         LEFT JOIN order_profit op ON op.account_id = o.account_id AND op.amazon_order_id = o.amazon_order_id AND op.asin = o.asin
         WHERE o.account_id = 1 AND o.asin = $1
           AND o.purchase_date >= $2::timestamptz AND o.purchase_date < $3::timestamptz
-          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+          AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
           AND op.id IS NULL
           ${countryFilter ? `AND m.country_code = '${countryFilter}'` : ''}
         GROUP BY m.country_code

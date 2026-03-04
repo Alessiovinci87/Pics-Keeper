@@ -67,7 +67,7 @@ if (!asin) {
             WHEN 'BE' THEN 'Europe/Brussels'
             ELSE 'UTC'
           END, 'UTC'))::date = $2::date
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
       ORDER BY m.country_code, o.purchase_date`,
       [asin, targetDate]
     );
@@ -131,7 +131,7 @@ if (!asin) {
       WHERE o.account_id = 1
         AND o.asin = $1
         AND o.purchase_date::date = $2::date
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
       GROUP BY m.country_code
       ORDER BY m.country_code`,
       [asin, targetDate]

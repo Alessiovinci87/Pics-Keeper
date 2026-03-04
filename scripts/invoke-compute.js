@@ -58,13 +58,13 @@ async function main() {
       mk.country_code,
       (SELECT SUM(o2.quantity) FROM orders_raw o2
        WHERE o2.account_id = $1 AND o2.marketplace_id = mk.id
-       AND UPPER(o2.order_status) NOT IN ('CANCELLED','CANCELED')
+       AND UPPER(o2.order_status) NOT IN ('CANCELLED','CANCELED','PENDING')
        AND o2.purchase_date >= $2 AND o2.purchase_date < $3) AS raw_units,
       (SELECT SUM(op2.quantity) FROM order_profit op2
        JOIN orders_raw o3 ON o3.account_id = op2.account_id
          AND o3.amazon_order_id = op2.amazon_order_id AND o3.asin = op2.asin
        WHERE op2.account_id = $1 AND op2.marketplace_id = mk.id
-       AND UPPER(o3.order_status) NOT IN ('CANCELLED','CANCELED')
+       AND UPPER(o3.order_status) NOT IN ('CANCELLED','CANCELED','PENDING')
        AND o3.purchase_date >= $2 AND o3.purchase_date < $3) AS profit_units,
       (SELECT SUM(adm.units_sold) FROM asin_daily_metrics adm
        WHERE adm.account_id = $1 AND adm.marketplace_id = mk.id

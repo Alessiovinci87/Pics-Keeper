@@ -65,7 +65,7 @@ const TZ_CASE = `
         AND o.asin = $1
         AND (o.purchase_date AT TIME ZONE ${TZ_CASE})::date >= $2::date
         AND (o.purchase_date AT TIME ZONE ${TZ_CASE})::date <= $3::date
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
         ${countryClause}
       GROUP BY m.country_code, o.currency
       ORDER BY units DESC
@@ -122,7 +122,7 @@ const TZ_CASE = `
         AND o.asin = $1
         AND (o.purchase_date AT TIME ZONE ${TZ_CASE})::date >= $2::date
         AND (o.purchase_date AT TIME ZONE ${TZ_CASE})::date <= $3::date
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
         ${countryClause}
       GROUP BY day, m.country_code
       ORDER BY day, m.country_code
@@ -166,7 +166,7 @@ const TZ_CASE = `
         AND o.asin = $1
         AND o.purchase_date >= $2::timestamptz
         AND o.purchase_date < ($3::date + 1)::timestamptz
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
         ${countryClause}
       GROUP BY m.country_code
       ORDER BY units DESC

@@ -108,7 +108,7 @@ const ProfitService = {
          WHERE account_id = $1 AND marketplace_id = $2
            AND (purchase_date AT TIME ZONE $5)::date >= $3::date
            AND (purchase_date AT TIME ZONE $5)::date < $4::date
-           AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
+           AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
          ORDER BY purchase_date`,
         [accountId, marketplaceId, dateFrom, dateTo, tz]
       );
@@ -164,7 +164,7 @@ const ProfitService = {
        WHERE op.account_id = o.account_id
          AND op.amazon_order_id = o.amazon_order_id
          AND op.asin = o.asin
-         AND UPPER(o.order_status) IN ('CANCELLED', 'CANCELED')
+         AND UPPER(o.order_status) IN ('CANCELLED', 'CANCELED', 'PENDING')
          AND op.account_id = $1
          AND op.marketplace_id = $2`,
       [accountId, marketplaceId]
@@ -271,7 +271,7 @@ const ProfitService = {
        WHERE account_id = $1 AND marketplace_id = $2
          AND (purchase_date AT TIME ZONE $5)::date >= $3::date
          AND (purchase_date AT TIME ZONE $5)::date < $4::date
-         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
        GROUP BY asin, (purchase_date AT TIME ZONE $5)::date`,
       [accountId, marketplaceId, dateFrom, dateTo, tz]
     );
@@ -297,7 +297,7 @@ const ProfitService = {
        WHERE account_id = $1 AND marketplace_id = $2
          AND (purchase_date AT TIME ZONE $5)::date >= DATE_TRUNC('month', $3::date)
          AND (purchase_date AT TIME ZONE $5)::date < DATE_TRUNC('month', $4::date) + INTERVAL '1 month'
-         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')
+         AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
        GROUP BY asin, DATE_TRUNC('month', (purchase_date AT TIME ZONE $5)::date)`,
       [accountId, marketplaceId, dateFrom, dateTo, tz]
     );

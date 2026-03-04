@@ -112,7 +112,7 @@ async function printUnits(dateFrom, dateTo) {
     FROM orders_raw o
     JOIN marketplaces mk ON mk.id = o.marketplace_id
     WHERE o.account_id = $1
-      AND UPPER(o.order_status) NOT IN ('CANCELLED','CANCELED')
+      AND UPPER(o.order_status) NOT IN ('CANCELLED','CANCELED','PENDING')
       AND o.purchase_date >= $2 AND o.purchase_date < $3
     GROUP BY mk.country_code
     ORDER BY units DESC

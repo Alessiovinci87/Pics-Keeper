@@ -122,7 +122,7 @@ const AggregationService = {
         AND op.marketplace_id = $2
         AND op.order_date >= $3
         AND op.order_date < $4
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
       GROUP BY op.account_id, op.marketplace_id, op.asin, op.order_date,
                ads.total_spend, ads.total_sales, op.currency
       ON CONFLICT (account_id, marketplace_id, asin, metric_date) DO UPDATE SET
@@ -480,7 +480,7 @@ const AggregationService = {
             WHEN 'CA' THEN 'America/Toronto'
             ELSE 'UTC'
           END, 'UTC'))::date = CURRENT_DATE
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
       GROUP BY m.country_code, m.name, o.currency
       ORDER BY gross_revenue DESC`,
       [accountId]
@@ -516,7 +516,7 @@ const AggregationService = {
             WHEN 'CA' THEN 'America/Toronto'
             ELSE 'UTC'
           END, 'UTC'))::date = CURRENT_DATE
-        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+        AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED', 'PENDING')
       GROUP BY o.asin, a.title, a.sku, m.country_code, o.currency
       ORDER BY units_sold DESC
       LIMIT 50`,
