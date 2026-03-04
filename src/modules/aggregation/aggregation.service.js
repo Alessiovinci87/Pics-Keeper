@@ -226,6 +226,155 @@ const AggregationService = {
   // ---- Query methods for API ----
 
   /**
+   * Get products dashboard: aggregated metrics per ASIN across the date range,
+   * with per-marketplace breakdown. This is the main dashboard view.
+   */
+  async getProductsDashboard({ accountId, dateFrom, dateTo, page = 1, limit = 50 }) {
+    const conditions = ['adm.account_id = $1'];
+    const params = [accountId];
+    let idx = 2;
+
+    if (dateFrom) {
+      conditions.push(`adm.metric_date >= $${idx}`);
+      params.push(dateFrom);
+      idx++;
+    }
+    if (dateTo) {
+      conditions.push(`adm.metric_date <= $${idx}`);
+      params.push(dateTo);
+      idx++;
+    }
+
+    const where = conditions.join(' AND ');
+    const offset = (page - 1) * limit;
+
+    // 1) Count distinct ASINs
+    const countResult = await db.query(
+      `SELECT COUNT(DISTINCT adm.asin) FROM asin_daily_metrics adm WHERE ${where}`,
+      params
+    );
+    const total = parseInt(countResult.rows[0].count, 10);
+
+    // 2) Aggregated data per ASIN (paginated by revenue DESC)
+    const dataResult = await db.query(
+      `SELECT
+        adm.asin,
+        a_info.title AS product_title,
+        a_info.image_url,
+        a_info.sku,
+        SUM(adm.units_sold)::numeric AS units_sold,
+        SUM(adm.orders_count)::numeric AS orders_count,
+        SUM(adm.revenue)::numeric AS revenue,
+        SUM(adm.total_amazon_fees)::numeric AS total_amazon_fees,
+        SUM(adm.refunds)::numeric AS refunds,
+        SUM(adm.ads_spend)::numeric AS ads_spend,
+        SUM(adm.total_product_costs)::numeric AS total_product_costs,
+        SUM(adm.net_profit)::numeric AS net_profit,
+        CASE WHEN SUM(adm.revenue) > 0
+          THEN ROUND((SUM(adm.net_profit) / SUM(adm.revenue)) * 100, 2)
+          ELSE 0 END AS margin_pct,
+        CASE WHEN SUM(adm.total_product_costs + adm.ads_spend) > 0
+          THEN ROUND((SUM(adm.net_profit) / SUM(adm.total_product_costs + adm.ads_spend)) * 100, 2)
+          ELSE 0 END AS roi_pct,
+        CASE WHEN SUM(adm.revenue) > 0
+          THEN ROUND((SUM(adm.ads_spend) / SUM(adm.revenue)) * 100, 2)
+          ELSE 0 END AS tacos_pct
+      FROM asin_daily_metrics adm
+      LEFT JOIN asins a_info ON a_info.account_id = adm.account_id AND a_info.asin = adm.asin
+      WHERE ${where}
+      GROUP BY adm.asin, a_info.title, a_info.image_url, a_info.sku
+      ORDER BY SUM(adm.revenue) DESC
+      LIMIT $${idx} OFFSET $${idx + 1}`,
+      [...params, limit, offset]
+    );
+
+    // 3) Per-marketplace breakdown for current page ASINs
+    const asins = dataResult.rows.map(r => r.asin);
+    let marketplaceMap = {};
+
+    if (asins.length > 0) {
+      const mpConditions = ['adm.account_id = $1', `adm.asin = ANY($2)`];
+      const mpParams = [accountId, asins];
+      let mpIdx = 3;
+
+      if (dateFrom) {
+        mpConditions.push(`adm.metric_date >= $${mpIdx}`);
+        mpParams.push(dateFrom);
+        mpIdx++;
+      }
+      if (dateTo) {
+        mpConditions.push(`adm.metric_date <= $${mpIdx}`);
+        mpParams.push(dateTo);
+        mpIdx++;
+      }
+
+      const mpResult = await db.query(
+        `SELECT
+          adm.asin,
+          m.country_code,
+          m.name AS marketplace_name,
+          adm.currency,
+          SUM(adm.units_sold)::numeric AS units_sold,
+          SUM(adm.orders_count)::numeric AS orders_count,
+          SUM(adm.revenue)::numeric AS revenue,
+          SUM(adm.total_amazon_fees)::numeric AS total_amazon_fees,
+          SUM(adm.refunds)::numeric AS refunds,
+          SUM(adm.ads_spend)::numeric AS ads_spend,
+          SUM(adm.total_product_costs)::numeric AS total_product_costs,
+          SUM(adm.net_profit)::numeric AS net_profit,
+          CASE WHEN SUM(adm.revenue) > 0
+            THEN ROUND((SUM(adm.net_profit) / SUM(adm.revenue)) * 100, 2)
+            ELSE 0 END AS margin_pct,
+          CASE WHEN SUM(adm.total_product_costs + adm.ads_spend) > 0
+            THEN ROUND((SUM(adm.net_profit) / SUM(adm.total_product_costs + adm.ads_spend)) * 100, 2)
+            ELSE 0 END AS roi_pct,
+          CASE WHEN SUM(adm.revenue) > 0
+            THEN ROUND((SUM(adm.ads_spend) / SUM(adm.revenue)) * 100, 2)
+            ELSE 0 END AS tacos_pct
+        FROM asin_daily_metrics adm
+        LEFT JOIN marketplaces m ON m.id = adm.marketplace_id
+        WHERE ${mpConditions.join(' AND ')}
+        GROUP BY adm.asin, m.country_code, m.name, adm.currency
+        ORDER BY SUM(adm.revenue) DESC`,
+        mpParams
+      );
+
+      for (const row of mpResult.rows) {
+        if (!marketplaceMap[row.asin]) marketplaceMap[row.asin] = [];
+        marketplaceMap[row.asin].push(row);
+      }
+    }
+
+    // 4) Build response with marketplace breakdown
+    const data = dataResult.rows.map(r => ({
+      ...r,
+      marketplaces: marketplaceMap[r.asin] || [],
+    }));
+
+    // 5) Summary across ALL ASINs (not just current page)
+    const summaryResult = await db.query(
+      `SELECT
+        SUM(adm.units_sold)::numeric AS units_sold,
+        SUM(adm.orders_count)::numeric AS orders_count,
+        SUM(adm.revenue)::numeric AS revenue,
+        SUM(adm.total_amazon_fees)::numeric AS total_amazon_fees,
+        SUM(adm.refunds)::numeric AS refunds,
+        SUM(adm.ads_spend)::numeric AS ads_spend,
+        SUM(adm.total_product_costs)::numeric AS total_product_costs,
+        SUM(adm.net_profit)::numeric AS net_profit
+      FROM asin_daily_metrics adm
+      WHERE ${where}`,
+      params
+    );
+
+    return {
+      data,
+      summary: summaryResult.rows[0],
+      pagination: { page, limit, total },
+    };
+  },
+
+  /**
    * Get ASIN dashboard data: daily metrics with filters.
    */
   async getAsinDashboard({ accountId, marketplaceId, asin, dateFrom, dateTo, page = 1, limit = 50 }) {
