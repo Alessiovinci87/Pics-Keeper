@@ -44,6 +44,7 @@ const AggregationService = {
       );
 
       await this.aggregateAccountDaily(accountId, marketplaceId, dateFrom, dateTo);
+      await this.reconcileUnitsWithBR(accountId, marketplaceId, dateFrom, dateTo);
       await this.aggregateAccountDailyTotal(accountId, dateFrom, dateTo);
 
       await SyncLogger.complete(syncLog.id, {});
@@ -260,6 +261,41 @@ const AggregationService = {
     );
 
     logger.debug('Account daily KPI aggregated (per marketplace)', { accountId, marketplaceId });
+  },
+
+  /**
+   * Reconcile account_daily_kpi.units_sold with Business Reports units_ordered.
+   *
+   * Business Reports (GET_SALES_AND_TRAFFIC_REPORT) is the same source as
+   * Shopkeeper and Amazon Seller Central. It's the authoritative number for
+   * "units ordered" because Amazon internally excludes certain stuck/invalid
+   * PENDING orders that the Orders API still returns.
+   *
+   * When BR data is available, override units_sold with the BR value.
+   */
+  async reconcileUnitsWithBR(accountId, marketplaceId, dateFrom, dateTo) {
+    const result = await db.query(
+      `UPDATE account_daily_kpi kpi
+       SET units_sold = brd.units_ordered,
+           computed_at = NOW()
+       FROM business_report_daily brd
+       WHERE brd.account_id = kpi.account_id
+         AND brd.marketplace_id = kpi.marketplace_id
+         AND brd.report_date = kpi.kpi_date
+         AND brd.asin = '_TOTAL'
+         AND brd.units_ordered IS NOT NULL
+         AND kpi.account_id = $1
+         AND kpi.marketplace_id = $2
+         AND kpi.kpi_date >= $3
+         AND kpi.kpi_date < $4`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+
+    if (result.rowCount > 0) {
+      logger.debug('Units reconciled with Business Reports', {
+        accountId, marketplaceId, rowsUpdated: result.rowCount,
+      });
+    }
   },
 
   /**

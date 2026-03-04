@@ -116,27 +116,31 @@ async function main() {
   let totalBr = 0;
   let totalOrders = 0;
 
-  console.log('  country | BR_units (=Shopkeeper) | Orders_API | delta');
-  console.log('  --------|------------------------|------------|------');
+  console.log('  country | BR_units (=Shopkeeper) | Orders_API | delta | dashboard_units');
+  console.log('  --------|------------------------|------------|-------|----------------');
 
   for (const row of comparison.rows) {
     const br = parseInt(row.br_units, 10);
     const oa = parseInt(row.orders_api_units, 10);
     const delta = br - oa;
     const deltaStr = delta === 0 ? '  0' : (delta > 0 ? ` +${delta}` : ` ${delta}`);
+    // Dashboard uses BR when available, falls back to Orders API
+    const dashboard = br > 0 ? br : oa;
 
-    console.log(`  ${row.country_code.padEnd(7)} | ${String(br).padStart(22)} | ${String(oa).padStart(10)} | ${deltaStr}`);
+    console.log(`  ${row.country_code.padEnd(7)} | ${String(br).padStart(22)} | ${String(oa).padStart(10)} | ${deltaStr.padStart(5)} | ${String(dashboard).padStart(14)}`);
     totalBr += br;
     totalOrders += oa;
   }
 
   const totalDelta = totalBr - totalOrders;
-  console.log('  --------|------------------------|------------|------');
-  console.log(`  TOTAL   | ${String(totalBr).padStart(22)} | ${String(totalOrders).padStart(10)} | ${totalDelta > 0 ? ` +${totalDelta}` : ` ${totalDelta}`}`);
+  const totalDashboard = totalBr > 0 ? totalBr : totalOrders;
+  console.log('  --------|------------------------|------------|-------|----------------');
+  console.log(`  TOTAL   | ${String(totalBr).padStart(22)} | ${String(totalOrders).padStart(10)} | ${String(totalDelta > 0 ? `+${totalDelta}` : totalDelta).padStart(5)} | ${String(totalDashboard).padStart(14)}`);
 
-  console.log(`\n  BR_units = dato Business Reports (stessa fonte di Shopkeeper)`);
-  console.log(`  Orders_API = SUM(quantity) da orders_raw (timezone-aware, local marketplace dates)`);
-  console.log(`  Entrambi usano le date locali del marketplace (es. Europe/Rome per IT)\n`);
+  console.log(`\n  BR_units       = Business Reports (stessa fonte di Shopkeeper)`);
+  console.log(`  Orders_API     = SUM(quantity) da orders_raw (excl. cancelled)`);
+  console.log(`  dashboard_units = valore usato nel sistema (BR quando disponibile)`);
+  console.log(`  Il delta residuo è dovuto a ordini PENDING invalidati internamente da Amazon\n`);
 
   console.log('Done.');
   await db.shutdown();
