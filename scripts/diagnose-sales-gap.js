@@ -232,8 +232,7 @@ async function run() {
         sl.sync_type, sl.status, sl.error_message,
         sl.started_at::date AS day, COUNT(*) AS occurrences
        FROM sync_log sl
-       JOIN account_marketplaces am ON am.id = sl.account_marketplace_id
-       JOIN marketplaces m ON m.id = am.marketplace_id
+       JOIN marketplaces m ON m.id = sl.marketplace_id
        WHERE m.country_code = 'IT'
          AND sl.started_at >= $1 AND sl.started_at < $2
          AND sl.status = 'failed'
