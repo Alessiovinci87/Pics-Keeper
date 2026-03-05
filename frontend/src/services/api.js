@@ -49,8 +49,9 @@ export async function deleteAccount(id) {
 }
 
 // ---- Products Dashboard ----
-export async function fetchProducts({ accountId, dateFrom, dateTo, page = 1, limit = 50 } = {}) {
+export async function fetchProducts({ accountId, countryCode, dateFrom, dateTo, page = 1, limit = 50 } = {}) {
   const params = { accountId, page, limit };
+  if (countryCode) params.countryCode = countryCode;
   if (dateFrom) params.dateFrom = dateFrom;
   if (dateTo) params.dateTo = dateTo;
   return apiFetch('/dashboard/products', params);
