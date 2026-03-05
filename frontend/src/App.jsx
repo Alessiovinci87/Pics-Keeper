@@ -26,6 +26,7 @@ function App() {
     const mm = String(today.getMonth() + 1).padStart(2, '0');
     const dd = String(today.getDate()).padStart(2, '0');
     const t = `${yyyy}-${mm}-${dd}`;
+    console.log('[App] dateRange init =>', t);
     return { from: t, to: t };
   });
 
