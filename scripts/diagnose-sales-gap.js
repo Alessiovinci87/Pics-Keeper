@@ -27,7 +27,7 @@ async function run() {
 
     // 0) Find Italy marketplace
     const mp = await client.query(
-      `SELECT id, amazon_marketplace_id, country_code FROM marketplaces WHERE country_code = 'IT'`
+      `SELECT id, marketplace_id AS amazon_marketplace_id, country_code FROM marketplaces WHERE country_code = 'IT'`
     );
     if (mp.rows.length === 0) {
       console.log('ERROR: Marketplace IT not found!');
