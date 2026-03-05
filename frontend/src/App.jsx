@@ -20,9 +20,13 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [backendConnected, setBackendConnected] = useState(false);
   const [selectedMarketplace, setSelectedMarketplace] = useState(null);
-  const [dateRange, setDateRange] = useState({
-    from: new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0],
-    to: new Date().toISOString().split('T')[0],
+  const [dateRange, setDateRange] = useState(() => {
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const t = `${yyyy}-${mm}-${dd}`;
+    return { from: t, to: t };
   });
 
   // Load accounts on mount
