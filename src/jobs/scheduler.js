@@ -8,7 +8,7 @@ const AdsService = require('../modules/ads/ads.service');
 const ProfitService = require('../modules/profit-engine/profit.service');
 const AggregationService = require('../modules/aggregation/aggregation.service');
 const AlertsService = require('../modules/alerts/alerts.service');
-const { toDateStr } = require('../utils/helpers');
+const { toDateStr, sleep } = require('../utils/helpers');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 dayjs.extend(utc);
@@ -46,7 +46,8 @@ async function withLock(jobName, fn) {
 async function syncOrdersJob() {
   await withLock('sync-orders', async () => {
     const targets = await AccountService.getActiveSyncTargets();
-    for (const target of targets) {
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
       try {
         await AccountService.setSyncStatus(target.account_id, target.account_marketplace_id, 'running');
         await OrdersService.syncOrders(target);
@@ -60,6 +61,10 @@ async function syncOrdersJob() {
           marketplace: target.country_code,
           error: err.message,
         });
+      }
+      // Pause between marketplaces to avoid SP-API rate limiting
+      if (i < targets.length - 1) {
+        await sleep(1500);
       }
     }
   });

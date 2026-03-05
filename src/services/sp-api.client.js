@@ -65,17 +65,16 @@ class SpApiClient {
           },
           params: method === 'GET' ? params : undefined,
           data: method !== 'GET' ? params : undefined,
+        }).catch((err) => {
+          // Enrich error with response details for better debugging
+          if (err.response?.data) {
+            const detail = JSON.stringify(err.response.data).substring(0, 500);
+            err.message = `${err.message} - ${detail}`;
+          }
+          throw err;
         }),
-      { maxRetries: 3, baseDelay: 2000, label: `SP-API ${method} ${path}` }
+      { maxRetries: 5, baseDelay: 2000, label: `SP-API ${method} ${path}` }
     );
-
-    // Handle rate limiting
-    if (response.status === 429) {
-      const retryAfter = parseInt(response.headers['retry-after'] || '2', 10);
-      logger.warn('SP-API rate limited, backing off', { retryAfter, path });
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
-      return this.request(method, path, params);
-    }
 
     return response.data.payload || response.data;
   }

@@ -75,9 +75,20 @@ async function retry(fn, { maxRetries = 3, baseDelay = 1000, label = 'operation'
       return await fn();
     } catch (err) {
       if (attempt === maxRetries) throw err;
-      const delay = baseDelay * Math.pow(2, attempt - 1);
+
+      // For 429 (rate limit), use retry-after header or longer backoff
+      const status = err.response?.status;
+      let delay;
+      if (status === 429) {
+        const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '0', 10);
+        delay = retryAfter > 0 ? retryAfter * 1000 : baseDelay * Math.pow(2, attempt) * 2;
+      } else {
+        delay = baseDelay * Math.pow(2, attempt - 1);
+      }
+
       logger.warn(`${label} attempt ${attempt} failed, retrying in ${delay}ms`, {
         error: err.message,
+        status,
       });
       await sleep(delay);
     }
