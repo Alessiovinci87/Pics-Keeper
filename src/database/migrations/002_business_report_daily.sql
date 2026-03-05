@@ -38,8 +38,8 @@ CREATE TABLE IF NOT EXISTS business_report_daily (
     UNIQUE (account_id, marketplace_id, report_date)
 );
 
-CREATE INDEX idx_brd_lookup ON business_report_daily(account_id, marketplace_id, report_date);
-CREATE INDEX idx_brd_date ON business_report_daily(report_date);
+CREATE INDEX IF NOT EXISTS idx_brd_lookup ON business_report_daily(account_id, marketplace_id, report_date);
+CREATE INDEX IF NOT EXISTS idx_brd_date ON business_report_daily(report_date);
 
 -- ============================================================
 -- Reconciliation view: compares orders_raw vs business_report_daily
