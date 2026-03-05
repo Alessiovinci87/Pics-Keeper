@@ -45,7 +45,8 @@ function toDateStr(dateInput) {
  * Build a date range for incremental sync: from lastSync to now, capped at maxDays.
  */
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
-  const now = dayjs.utc();
+  // SP-API requires CreatedBefore to be at least 2 minutes before current time
+  const now = dayjs.utc().subtract(3, 'minute');
   let from;
   if (lastSyncAt) {
     from = dayjs.utc(lastSyncAt);
@@ -74,10 +75,10 @@ async function retry(fn, { maxRetries = 3, baseDelay = 1000, label = 'operation'
     try {
       return await fn();
     } catch (err) {
-      if (attempt === maxRetries) throw err;
-
-      // For 429 (rate limit), use retry-after header or longer backoff
       const status = err.response?.status;
+      // Don't retry client errors (except 429 rate limiting)
+      if (status && status >= 400 && status < 500 && status !== 429) throw err;
+      if (attempt === maxRetries) throw err;
       let delay;
       if (status === 429) {
         const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '0', 10);
