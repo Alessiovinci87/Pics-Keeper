@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
 import DashboardHeader from './components/DashboardHeader';
 import ProductTable from './components/ProductTable';
@@ -35,17 +35,17 @@ function App() {
     loadAccounts();
   }, []);
 
-  // Load products when account, date, or page changes
+  // Load products when account, date, marketplace, or page changes
   useEffect(() => {
     if (section === 'products') {
       loadProducts();
     }
-  }, [selectedAccountId, dateRange, pagination.page, section]);
+  }, [selectedAccountId, dateRange, selectedMarketplace, pagination.page, section]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
     setPagination(prev => ({ ...prev, page: 1 }));
-  }, [selectedAccountId, dateRange]);
+  }, [selectedAccountId, dateRange, selectedMarketplace]);
 
   async function loadAccounts() {
     try {
@@ -72,6 +72,7 @@ function App() {
     try {
       const result = await fetchProducts({
         accountId: selectedAccountId,
+        countryCode: selectedMarketplace || undefined,
         dateFrom: dateRange.from,
         dateTo: dateRange.to,
         page: pagination.page,
@@ -91,42 +92,8 @@ function App() {
     }
   }
 
-  // Filter products by selected marketplace.
-  // Always show all products — if a product has no data for the selected
-  // marketplace, show it with zeroed metrics so the user can still see
-  // ads spend or identify where to take action.
-  const filteredProducts = useMemo(() => {
-    if (!selectedMarketplace) return products;
-
-    return products.map((p) => {
-      const mp = (p.marketplaces || []).find((m) => m.country_code === selectedMarketplace);
-      const emptyMp = {
-        country_code: selectedMarketplace,
-        marketplace_name: selectedMarketplace,
-        currency: 'EUR',
-        units_sold: 0, orders_count: 0, revenue: 0,
-        total_amazon_fees: 0, refunds: 0, ads_spend: 0,
-        total_product_costs: 0, net_profit: 0,
-        margin_pct: 0, roi_pct: 0, tacos_pct: 0,
-      };
-      const data = mp || emptyMp;
-      return {
-        ...p,
-        units_sold: data.units_sold,
-        orders_count: data.orders_count,
-        revenue: data.revenue,
-        total_amazon_fees: data.total_amazon_fees,
-        refunds: data.refunds,
-        ads_spend: data.ads_spend,
-        total_product_costs: data.total_product_costs,
-        net_profit: data.net_profit,
-        margin_pct: data.margin_pct,
-        roi_pct: data.roi_pct,
-        tacos_pct: data.tacos_pct,
-        marketplaces: mp ? [mp] : [],
-      };
-    });
-  }, [products, selectedMarketplace]);
+  // Products are already filtered by marketplace on the backend
+  const filteredProducts = products;
 
   function renderContent() {
     switch (section) {

@@ -113,21 +113,8 @@ export default function DashboardHeader({ products, summary: backendSummary, dat
     }
   }
 
-  const clientSummary = products.reduce(
-    (acc, p) => ({
-      revenue: acc.revenue + Number(p.revenue),
-      units: acc.units + Number(p.units_sold),
-      orders: acc.orders + Number(p.orders_count),
-      profit: acc.profit + Number(p.net_profit),
-      ads: acc.ads + Number(p.ads_spend),
-      fees: acc.fees + Number(p.total_amazon_fees),
-      costs: acc.costs + Number(p.total_product_costs),
-      refunds: acc.refunds + Number(p.refunds),
-    }),
-    { revenue: 0, units: 0, orders: 0, profit: 0, ads: 0, fees: 0, costs: 0, refunds: 0 }
-  );
-
-  const summary = (!selectedMarketplace && backendSummary)
+  // Always use backend summary (covers all pages, already filtered by marketplace)
+  const summary = backendSummary
     ? {
         revenue: backendSummary.revenue,
         units: backendSummary.units_sold,
@@ -138,7 +125,7 @@ export default function DashboardHeader({ products, summary: backendSummary, dat
         costs: backendSummary.total_product_costs,
         refunds: backendSummary.refunds,
       }
-    : clientSummary;
+    : { revenue: 0, units: 0, orders: 0, profit: 0, ads: 0, fees: 0, costs: 0, refunds: 0 };
 
   const margin = summary.revenue > 0 ? (summary.profit / summary.revenue) * 100 : 0;
   const tacos = summary.revenue > 0 ? (summary.ads / summary.revenue) * 100 : 0;

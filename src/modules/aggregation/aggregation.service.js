@@ -229,11 +229,16 @@ const AggregationService = {
    * Get products dashboard: aggregated metrics per ASIN across the date range,
    * with per-marketplace breakdown. This is the main dashboard view.
    */
-  async getProductsDashboard({ accountId, dateFrom, dateTo, page = 1, limit = 50 }) {
+  async getProductsDashboard({ accountId, marketplaceId, dateFrom, dateTo, page = 1, limit = 50 }) {
     const conditions = ['adm.account_id = $1'];
     const params = [accountId];
     let idx = 2;
 
+    if (marketplaceId) {
+      conditions.push(`adm.marketplace_id = $${idx}`);
+      params.push(marketplaceId);
+      idx++;
+    }
     if (dateFrom) {
       conditions.push(`adm.metric_date >= $${idx}`);
       params.push(dateFrom);
