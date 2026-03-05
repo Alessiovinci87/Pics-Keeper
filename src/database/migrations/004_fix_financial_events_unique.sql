@@ -17,12 +17,15 @@ EXCEPTION WHEN OTHERS THEN
 END $$;
 
 -- Step 2: Remove duplicate rows, keeping only the most recent (highest id)
-DELETE FROM financial_events_raw
-WHERE id NOT IN (
-  SELECT MAX(id)
+DELETE FROM financial_events_raw a
+USING (
+  SELECT id, ROW_NUMBER() OVER (
+    PARTITION BY account_id, amazon_order_id, event_type, fee_type, event_date
+    ORDER BY id DESC
+  ) AS rn
   FROM financial_events_raw
-  GROUP BY account_id, amazon_order_id, event_type, fee_type, event_date
-);
+) b
+WHERE a.id = b.id AND b.rn > 1;
 
 -- Step 3: Recreate with NULLS NOT DISTINCT so ON CONFLICT works with NULL values
 ALTER TABLE financial_events_raw
