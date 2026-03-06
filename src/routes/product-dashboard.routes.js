@@ -127,6 +127,28 @@ router.get('/', validate({ query: ['accountId'] }), async (req, res, next) => {
       }
     }
 
+    // Summary: aggregate across ALL ASINs (not just current page)
+    const summaryResult = await db.query(
+      `SELECT
+        SUM(adm.units_sold)::numeric AS units_sold,
+        SUM(adm.orders_count)::numeric AS orders_count,
+        SUM(adm.revenue)::numeric AS revenue,
+        SUM(adm.total_amazon_fees)::numeric AS total_amazon_fees,
+        SUM(adm.refunds)::numeric AS refunds,
+        SUM(adm.ads_spend)::numeric AS ads_spend,
+        SUM(adm.total_product_costs)::numeric AS total_product_costs,
+        SUM(adm.net_profit)::numeric AS net_profit,
+        CASE WHEN SUM(adm.revenue) > 0
+          THEN ROUND((SUM(adm.net_profit) / SUM(adm.revenue)) * 100, 2)
+          ELSE 0 END AS margin_pct,
+        CASE WHEN SUM(adm.revenue) > 0 AND SUM(adm.ads_spend) > 0
+          THEN ROUND((SUM(adm.ads_spend) / SUM(adm.revenue)) * 100, 2)
+          ELSE 0 END AS tacos_pct
+      FROM asin_daily_metrics adm
+      WHERE ${whereClause}`,
+      params
+    );
+
     // Compose response
     const products = productsResult.rows.map(product => ({
       ...product,
@@ -135,6 +157,7 @@ router.get('/', validate({ query: ['accountId'] }), async (req, res, next) => {
 
     res.json({
       data: products,
+      summary: summaryResult.rows[0] || null,
       pagination: {
         page,
         limit,
