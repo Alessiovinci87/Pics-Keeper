@@ -210,6 +210,9 @@ router.post('/trigger/orders/:countryCode', async (req, res, next) => {
     if (req.body && req.body.dateFrom) {
       options.dateFrom = req.body.dateFrom;
     }
+    if (req.body && req.body.force) {
+      options.force = true;
+    }
 
     // Run async, same logic as syncOrdersJob but single target
     (async () => {
