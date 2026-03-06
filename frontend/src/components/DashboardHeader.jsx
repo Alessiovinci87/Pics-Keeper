@@ -164,15 +164,43 @@ export default function DashboardHeader({ products, summary: backendSummary, dat
             </button>
 
             {showDatePicker && (
-              <div className="date-picker-dropdown">
-                <div className="date-picker-presets">
+              <div className="date-picker-dropdown" style={{
+                position: 'absolute', top: 'calc(100% + 6px)', right: 0,
+                zIndex: 100, display: 'flex',
+                background: 'var(--bg-secondary, #22262e)',
+                border: '1px solid var(--border-color, #333842)',
+                borderRadius: 'var(--radius-md, 10px)',
+                boxShadow: 'var(--shadow-dropdown, 0 4px 12px rgba(0,0,0,0.4))',
+                overflow: 'hidden', minWidth: 420
+              }}>
+                <div className="date-picker-presets" style={{
+                  display: 'flex', flexDirection: 'column', padding: 8,
+                  borderRight: '1px solid var(--border-color, #333842)',
+                  minWidth: 180, maxHeight: 380, overflowY: 'auto'
+                }}>
                   {presets.map((preset, i) =>
                     preset.divider ? (
-                      <div key={`div-${i}`} className="date-picker-divider" />
+                      <div key={`div-${i}`} className="date-picker-divider" style={{
+                        height: 1, background: 'var(--border-color, #333842)', margin: '4px 8px'
+                      }} />
                     ) : (
                       <button
                         key={preset.label}
                         className={`date-preset-btn ${preset.from === dateRange.from && preset.to === dateRange.to ? 'active' : ''}`}
+                        style={{
+                          appearance: 'none', WebkitAppearance: 'none',
+                          background: preset.from === dateRange.from && preset.to === dateRange.to
+                            ? 'var(--color-accent-dim, rgba(59,130,246,0.15))'
+                            : 'none',
+                          border: 'none',
+                          color: preset.from === dateRange.from && preset.to === dateRange.to
+                            ? 'var(--color-accent, #60a5fa)'
+                            : 'var(--text-secondary, #9aa0a6)',
+                          padding: '7px 12px', fontSize: 12, textAlign: 'left',
+                          cursor: 'pointer', borderRadius: 'var(--radius-sm, 6px)',
+                          whiteSpace: 'nowrap',
+                          fontWeight: preset.from === dateRange.from && preset.to === dateRange.to ? 600 : 'normal'
+                        }}
                         onClick={() => selectPreset(preset)}
                       >
                         {preset.label}
@@ -180,27 +208,47 @@ export default function DashboardHeader({ products, summary: backendSummary, dat
                     )
                   )}
                 </div>
-                <div className="date-picker-custom">
-                  <span className="date-custom-title">Personalizzato</span>
-                  <div className="date-custom-inputs">
-                    <div className="date-custom-field">
-                      <label>Da</label>
+                <div className="date-picker-custom" style={{
+                  padding: 16, display: 'flex', flexDirection: 'column', gap: 12, minWidth: 220
+                }}>
+                  <span className="date-custom-title" style={{
+                    fontSize: 11, fontWeight: 600, textTransform: 'uppercase',
+                    letterSpacing: 0.5, color: 'var(--text-muted, #6b7280)'
+                  }}>Personalizzato</span>
+                  <div className="date-custom-inputs" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div className="date-custom-field" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted, #6b7280)', fontWeight: 500 }}>Da</label>
                       <input
                         type="date"
                         value={customFrom}
                         onChange={(e) => setCustomFrom(e.target.value)}
+                        style={{
+                          background: 'var(--bg-tertiary, #2a2f38)',
+                          border: '1px solid var(--border-color, #333842)',
+                          borderRadius: 'var(--radius-sm, 6px)',
+                          color: 'var(--text-primary, #e8eaed)',
+                          padding: '7px 10px', fontSize: 12, outline: 'none', width: '100%'
+                        }}
                       />
                     </div>
-                    <div className="date-custom-field">
-                      <label>A</label>
+                    <div className="date-custom-field" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted, #6b7280)', fontWeight: 500 }}>A</label>
                       <input
                         type="date"
                         value={customTo}
                         onChange={(e) => setCustomTo(e.target.value)}
+                        style={{
+                          background: 'var(--bg-tertiary, #2a2f38)',
+                          border: '1px solid var(--border-color, #333842)',
+                          borderRadius: 'var(--radius-sm, 6px)',
+                          color: 'var(--text-primary, #e8eaed)',
+                          padding: '7px 10px', fontSize: 12, outline: 'none', width: '100%'
+                        }}
                       />
                     </div>
                   </div>
-                  <button className="btn btn-primary date-apply-btn" onClick={applyCustomRange}>
+                  <button className="btn btn-primary date-apply-btn" onClick={applyCustomRange}
+                    style={{ marginTop: 4, width: '100%', textAlign: 'center' }}>
                     Applica
                   </button>
                 </div>
