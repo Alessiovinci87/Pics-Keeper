@@ -52,8 +52,13 @@ const FinancialService = {
         to,
       });
 
-      // Pre-build marketplace resolution map: amazon_order_id -> marketplace_id
+      // Pre-build resolution maps
       const mpMap = await this.buildMarketplaceMap(target.account_id);
+      const skuMap = await this.buildSkuToAsinMap(target.account_id);
+
+      // Fix legacy records: update financial events that stored SellerSKU
+      // instead of ASIN, so upserts match correctly and avoid duplicates.
+      await this.fixLegacySkuRecords(target.account_id, skuMap);
 
       const spApi = new SpApiClient(target);
       let nextToken = null;
@@ -70,7 +75,7 @@ const FinancialService = {
         // Process ShipmentEventList (order-level charges + fees)
         for (const event of eventList.ShipmentEventList || []) {
           for (const itemCharges of event.ShipmentItemList || []) {
-            const rows = this.extractShipmentFees(target, event, itemCharges, mpMap);
+            const rows = this.extractShipmentFees(target, event, itemCharges, mpMap, skuMap);
             for (const row of rows) {
               processed++;
               const res = await this.upsertEvent(row);
@@ -82,7 +87,7 @@ const FinancialService = {
         // Process RefundEventList
         for (const event of eventList.RefundEventList || []) {
           for (const itemCharges of event.ShipmentItemList || []) {
-            const rows = this.extractRefundFees(target, event, itemCharges, mpMap);
+            const rows = this.extractRefundFees(target, event, itemCharges, mpMap, skuMap);
             for (const row of rows) {
               processed++;
               const res = await this.upsertEvent(row);
@@ -146,6 +151,55 @@ const FinancialService = {
   },
 
   /**
+   * Build a map of SellerSKU -> ASIN from orders_raw.
+   * Used to resolve the ASIN for financial events that only provide SellerSKU.
+   */
+  async buildSkuToAsinMap(accountId) {
+    const result = await db.query(
+      `SELECT DISTINCT sku, asin
+       FROM orders_raw
+       WHERE account_id = $1 AND sku IS NOT NULL`,
+      [accountId]
+    );
+
+    const map = {};
+    for (const row of result.rows) {
+      map[row.sku] = row.asin;
+    }
+    return map;
+  },
+
+  /**
+   * Fix legacy financial event records that stored SellerSKU instead of ASIN.
+   * Updates them in-place so that subsequent upserts will match correctly
+   * and won't create duplicates.
+   */
+  async fixLegacySkuRecords(accountId, skuMap) {
+    const skus = Object.keys(skuMap);
+    if (skus.length === 0) return;
+
+    const result = await db.query(
+      `UPDATE financial_events_raw fe
+       SET asin = o.asin
+       FROM orders_raw o
+       WHERE fe.account_id = $1
+         AND fe.amazon_order_id IS NOT NULL
+         AND fe.amazon_order_id = o.amazon_order_id
+         AND fe.account_id = o.account_id
+         AND fe.asin = o.sku
+         AND fe.asin != o.asin`,
+      [accountId]
+    );
+
+    if (result.rowCount > 0) {
+      logger.info('Fixed legacy SKU-based financial events', {
+        accountId,
+        updated: result.rowCount,
+      });
+    }
+  },
+
+  /**
    * Resolve marketplace_id for a financial event.
    * Uses orders_raw as source of truth. Falls back to the sync target marketplace.
    */
@@ -187,10 +241,12 @@ const FinancialService = {
    * Maps Amazon fee types to our normalized structure.
    * Resolves marketplace from orders_raw, not from sync target.
    */
-  extractShipmentFees(target, event, itemCharges, mpMap) {
+  extractShipmentFees(target, event, itemCharges, mpMap, skuMap = {}) {
     const rows = [];
     const orderId = event.AmazonOrderId;
-    const asin = itemCharges.SellerSKU;
+    const sellerSku = itemCharges.SellerSKU;
+    // Resolve SellerSKU → ASIN if possible; otherwise keep raw SKU
+    const asin = skuMap[sellerSku] || sellerSku;
     const postedDate = event.PostedDate;
     const resolvedMp = this.resolveMarketplaceId(orderId, target, mpMap);
 
@@ -253,9 +309,11 @@ const FinancialService = {
   /**
    * Extract refund event fees. Amounts are typically negative.
    */
-  extractRefundFees(target, event, itemCharges, mpMap) {
+  extractRefundFees(target, event, itemCharges, mpMap, skuMap = {}) {
     const rows = [];
     const orderId = event.AmazonOrderId;
+    const sellerSku = itemCharges.SellerSKU;
+    const asin = skuMap[sellerSku] || sellerSku;
     const postedDate = event.PostedDate;
     const resolvedMp = this.resolveMarketplaceId(orderId, target, mpMap);
 
@@ -264,7 +322,7 @@ const FinancialService = {
         account_id: target.account_id,
         marketplace_id: resolvedMp,
         amazon_order_id: orderId,
-        asin: itemCharges.SellerSKU,
+        asin: asin,
         event_type: 'RefundEvent',
         fee_type: charge.ChargeType,
         amount: parseFloat(charge.ChargeAmount?.CurrencyAmount || 0),
@@ -280,7 +338,7 @@ const FinancialService = {
         account_id: target.account_id,
         marketplace_id: resolvedMp,
         amazon_order_id: orderId,
-        asin: itemCharges.SellerSKU,
+        asin: asin,
         event_type: 'RefundEvent',
         fee_type: fee.FeeType,
         amount: parseFloat(fee.FeeAmount?.CurrencyAmount || 0),
