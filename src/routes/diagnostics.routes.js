@@ -819,4 +819,143 @@ router.get(
   }
 );
 
+/**
+ * GET /api/diagnostics/fee-coverage
+ * For orders on a specific date, how many have matching financial events?
+ * This directly answers: "Are fees available for these orders?"
+ *
+ * Query params:
+ *   accountId (required), marketplaceId (required), date (required)
+ *
+ * Example:
+ *   /api/diagnostics/fee-coverage?accountId=1&marketplaceId=3&date=2026-03-03
+ */
+router.get(
+  '/fee-coverage',
+  validate({ query: ['accountId', 'marketplaceId', 'date'] }),
+  async (req, res, next) => {
+    try {
+      const db = require('../database/pool');
+      const dayjs = require('dayjs');
+      const accountId = parseInt(req.query.accountId, 10);
+      const marketplaceId = parseInt(req.query.marketplaceId, 10);
+      const { date } = req.query;
+
+      const nextDate = dayjs(date).add(1, 'day').format('YYYY-MM-DD');
+
+      // 1. Orders on this date
+      const ordersOnDate = await db.query(
+        `SELECT COUNT(DISTINCT amazon_order_id) AS distinct_orders,
+                COUNT(*) AS order_lines
+         FROM orders_raw
+         WHERE account_id = $1 AND marketplace_id = $2
+           AND purchase_date::date >= $3::date
+           AND purchase_date::date < $4::date
+           AND UPPER(order_status) NOT IN ('CANCELLED', 'CANCELED')`,
+        [accountId, marketplaceId, date, nextDate]
+      );
+
+      // 2. How many of those orders have ANY entry in financial_events_raw?
+      const ordersWithAnyFe = await db.query(
+        `SELECT COUNT(DISTINCT o.amazon_order_id) AS orders_with_any_fe
+         FROM orders_raw o
+         WHERE o.account_id = $1 AND o.marketplace_id = $2
+           AND o.purchase_date::date >= $3::date
+           AND o.purchase_date::date < $4::date
+           AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+           AND EXISTS (
+             SELECT 1 FROM financial_events_raw fe
+             WHERE fe.amazon_order_id = o.amazon_order_id
+               AND fe.account_id = o.account_id
+           )`,
+        [accountId, marketplaceId, date, nextDate]
+      );
+
+      // 3. How many have matching fee entries (the full JOIN used by buildFeeMap)?
+      const ordersWithMatchedFees = await db.query(
+        `SELECT COUNT(DISTINCT o.amazon_order_id) AS orders_with_matched_fees
+         FROM orders_raw o
+         WHERE o.account_id = $1 AND o.marketplace_id = $2
+           AND o.purchase_date::date >= $3::date
+           AND o.purchase_date::date < $4::date
+           AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+           AND EXISTS (
+             SELECT 1 FROM financial_events_raw fe
+             WHERE fe.amazon_order_id = o.amazon_order_id
+               AND fe.account_id = o.account_id
+               AND (o.asin = fe.asin OR o.sku = fe.asin)
+               AND fe.event_type = 'ShipmentEvent'
+               AND fe.amount < 0
+           )`,
+        [accountId, marketplaceId, date, nextDate]
+      );
+
+      // 4. Sample: 5 orders WITHOUT financial events
+      const sampleMissing = await db.query(
+        `SELECT o.amazon_order_id, o.asin, o.sku, o.purchase_date, o.item_price
+         FROM orders_raw o
+         WHERE o.account_id = $1 AND o.marketplace_id = $2
+           AND o.purchase_date::date >= $3::date
+           AND o.purchase_date::date < $4::date
+           AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+           AND NOT EXISTS (
+             SELECT 1 FROM financial_events_raw fe
+             WHERE fe.amazon_order_id = o.amazon_order_id
+               AND fe.account_id = o.account_id
+           )
+         LIMIT 5`,
+        [accountId, marketplaceId, date, nextDate]
+      );
+
+      // 5. Sample: 5 orders WITH financial events but WITHOUT matched fees
+      const sampleUnmatched = await db.query(
+        `SELECT o.amazon_order_id, o.asin, o.sku,
+                fe.asin AS fe_asin, fe.fee_type, fe.amount
+         FROM orders_raw o
+         JOIN financial_events_raw fe
+           ON fe.amazon_order_id = o.amazon_order_id
+           AND fe.account_id = o.account_id
+         WHERE o.account_id = $1 AND o.marketplace_id = $2
+           AND o.purchase_date::date >= $3::date
+           AND o.purchase_date::date < $4::date
+           AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+           AND NOT EXISTS (
+             SELECT 1 FROM financial_events_raw fe2
+             WHERE fe2.amazon_order_id = o.amazon_order_id
+               AND fe2.account_id = o.account_id
+               AND (o.asin = fe2.asin OR o.sku = fe2.asin)
+               AND fe2.event_type = 'ShipmentEvent'
+               AND fe2.amount < 0
+           )
+         LIMIT 10`,
+        [accountId, marketplaceId, date, nextDate]
+      );
+
+      // 6. Date range of financial events for this account
+      const feRange = await db.query(
+        `SELECT MIN(event_date) AS earliest, MAX(event_date) AS latest,
+                COUNT(*) AS total_events,
+                COUNT(DISTINCT amazon_order_id) AS distinct_orders
+         FROM financial_events_raw
+         WHERE account_id = $1`,
+        [accountId]
+      );
+
+      res.json({
+        params: { accountId, marketplaceId, date },
+        ordersOnDate: ordersOnDate.rows[0],
+        coverage: {
+          orders_with_any_financial_event: ordersWithAnyFe.rows[0].orders_with_any_fe,
+          orders_with_matched_fees: ordersWithMatchedFees.rows[0].orders_with_matched_fees,
+        },
+        financialEventsRange: feRange.rows[0],
+        sampleOrdersWithoutFinancialEvents: sampleMissing.rows,
+        sampleOrdersWithUnmatchedFees: sampleUnmatched.rows,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
