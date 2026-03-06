@@ -209,17 +209,24 @@ const ProfitService = {
     // SP-API financial events often store SellerSKU (e.g. "68-YM50-I8G3")
     // instead of ASIN (e.g. "B0BY9Q4KTT"). Without this resolution,
     // the fee lookup key won't match the order's ASIN.
+    //
+    // IMPORTANT: Do NOT filter by fe.marketplace_id here.
+    // Amazon Financial Events API returns all events under the primary
+    // marketplace (e.g. DE for EU unified accounts), regardless of the
+    // actual order marketplace. Instead, we join with orders_raw and
+    // filter by the ORDER's marketplace_id to get fees for the right orders.
     const result = await db.query(
       `SELECT fe.amazon_order_id,
               COALESCE(o.asin, fe.asin) AS asin,
               fe.fee_type,
               SUM(fe.amount) AS total_amount
        FROM financial_events_raw fe
-       LEFT JOIN orders_raw o
+       JOIN orders_raw o
          ON o.amazon_order_id = fe.amazon_order_id
          AND o.account_id = fe.account_id
          AND (o.asin = fe.asin OR o.sku = fe.asin)
-       WHERE fe.account_id = $1 AND fe.marketplace_id = $2
+       WHERE fe.account_id = $1
+         AND o.marketplace_id = $2
          AND fe.event_date >= $3 AND fe.event_date < $4
          AND fe.event_type = 'ShipmentEvent'
          AND fe.amount < 0
@@ -453,14 +460,22 @@ const ProfitService = {
    * (order line with highest revenue).
    */
   async processRefunds(accountId, marketplaceId, dateFrom, dateTo) {
-    // Get all refund events in the date range
+    // Get all refund events in the date range.
+    // Join with orders_raw to filter by order's marketplace_id, since
+    // financial events may be stored under the primary marketplace (e.g. DE)
+    // for EU unified accounts.
     const refunds = await db.query(
-      `SELECT amazon_order_id, asin, SUM(amount) AS refund_total
-       FROM financial_events_raw
-       WHERE account_id = $1 AND marketplace_id = $2
-         AND event_type = 'RefundEvent'
-         AND event_date >= $3 AND event_date < $4
-       GROUP BY amazon_order_id, asin`,
+      `SELECT fe.amazon_order_id, COALESCE(o.asin, fe.asin) AS asin, SUM(fe.amount) AS refund_total
+       FROM financial_events_raw fe
+       JOIN orders_raw o
+         ON o.amazon_order_id = fe.amazon_order_id
+         AND o.account_id = fe.account_id
+         AND (o.asin = fe.asin OR o.sku = fe.asin)
+       WHERE fe.account_id = $1
+         AND o.marketplace_id = $2
+         AND fe.event_type = 'RefundEvent'
+         AND fe.event_date >= $3 AND fe.event_date < $4
+       GROUP BY fe.amazon_order_id, COALESCE(o.asin, fe.asin)`,
       [accountId, marketplaceId, dateFrom, dateTo]
     );
 
