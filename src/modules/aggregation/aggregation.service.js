@@ -35,6 +35,37 @@ const AggregationService = {
    * Upserts into asin_daily_metrics.
    */
   async aggregateAsinDaily(accountId, marketplaceId, dateFrom, dateTo) {
+    // Clean up stale asin_daily_metrics rows: delete rows for this marketplace+date range
+    // that have NO corresponding order_profit data AND NO ads_daily_spend data.
+    // This prevents ghost rows from accumulating when orders move between marketplaces.
+    const cleanupResult = await db.query(
+      `DELETE FROM asin_daily_metrics adm
+       WHERE adm.account_id = $1
+         AND adm.marketplace_id = $2
+         AND adm.metric_date >= $3::date
+         AND adm.metric_date < $4::date
+         AND NOT EXISTS (
+           SELECT 1 FROM order_profit op
+           WHERE op.account_id = adm.account_id
+             AND op.marketplace_id = adm.marketplace_id
+             AND op.asin = adm.asin
+             AND op.order_date = adm.metric_date
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ads_daily_spend ads
+           WHERE ads.account_id = adm.account_id
+             AND ads.marketplace_id = adm.marketplace_id
+             AND ads.asin = adm.asin
+             AND ads.spend_date = adm.metric_date
+         )`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+    if (cleanupResult.rowCount > 0) {
+      logger.info('Cleaned stale asin_daily_metrics rows', {
+        accountId, marketplaceId, deleted: cleanupResult.rowCount,
+      });
+    }
+
     // This single query aggregates all order profit data and ads spend,
     // then upserts into asin_daily_metrics.
     await db.query(
@@ -165,6 +196,23 @@ const AggregationService = {
    * Aggregate account-level daily KPIs per marketplace.
    */
   async aggregateAccountDaily(accountId, marketplaceId, dateFrom, dateTo) {
+    // Clean stale account_daily_kpi rows: if no asin_daily_metrics exist for this
+    // marketplace+date range, delete the KPI row so it doesn't inflate totals.
+    await db.query(
+      `DELETE FROM account_daily_kpi adk
+       WHERE adk.account_id = $1
+         AND adk.marketplace_id = $2
+         AND adk.kpi_date >= $3::date
+         AND adk.kpi_date < $4::date
+         AND NOT EXISTS (
+           SELECT 1 FROM asin_daily_metrics adm
+           WHERE adm.account_id = adk.account_id
+             AND adm.marketplace_id = adk.marketplace_id
+             AND adm.metric_date = adk.kpi_date
+         )`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+
     await db.query(
       `INSERT INTO account_daily_kpi (
         account_id, marketplace_id, kpi_date,
