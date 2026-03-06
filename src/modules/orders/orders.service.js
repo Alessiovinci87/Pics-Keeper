@@ -1,3 +1,4 @@
+const axios = require('axios');
 const db = require('../../database/pool');
 const logger = require('../../utils/logger');
 const { syncDateRange, sleep } = require('../../utils/helpers');
@@ -8,11 +9,16 @@ const utc = require('dayjs/plugin/utc');
 dayjs.extend(utc);
 
 /**
- * Orders Sync Service - incrementally fetches orders from Amazon SP-API.
- * Uses Orders API v2026-01-01 (searchOrders) with embedded items + proceeds.
+ * Orders Sync Service - fetches orders via SP-API Reports API.
+ * Uses GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL report
+ * (no Orders API endpoint needed — works with Reports role only).
  * Idempotent: uses ON CONFLICT to prevent duplicates.
  */
 const OrdersService = {
+  REPORT_TYPE: 'GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL',
+  POLL_INTERVAL_MS: 15000,
+  MAX_POLL_ATTEMPTS: 40, // ~10 minutes max
+
   /**
    * Sync orders for a single account+marketplace.
    */
@@ -24,17 +30,15 @@ const OrdersService = {
     try {
       let from, to;
       if (overrideFrom) {
-        from = dayjs.utc(overrideFrom).startOf('day').toISOString();
-        to = overrideTo ? dayjs.utc(overrideTo).endOf('day').toISOString() : dayjs.utc().toISOString();
+        from = dayjs.utc(overrideFrom).startOf('day').format('YYYY-MM-DD');
+        to = overrideTo ? dayjs.utc(overrideTo).endOf('day').format('YYYY-MM-DD') : dayjs.utc().format('YYYY-MM-DD');
       } else {
-        ({ from, to } = syncDateRange(target.last_orders_sync_at, 30));
+        const range = syncDateRange(target.last_orders_sync_at, 30);
+        from = dayjs.utc(range.from).format('YYYY-MM-DD');
+        to = dayjs.utc(range.to).format('YYYY-MM-DD');
       }
 
-      // SP-API requires createdBefore to be at least 2 minutes in the past
-      const maxTo = dayjs.utc().subtract(3, 'minute');
-      to = dayjs.utc(to).isAfter(maxTo) ? maxTo.toISOString() : dayjs.utc(to).toISOString();
-
-      logger.info('Starting orders sync (v2026 API)', {
+      logger.info('Starting orders sync (Reports API)', {
         accountId: target.account_id,
         marketplace: target.country_code,
         from,
@@ -42,115 +46,115 @@ const OrdersService = {
       });
 
       const spApi = new SpApiClient(target);
-      let paginationToken = null;
-      let totalOrders = 0;
+
+      // 1. Request report
+      const reportResult = await spApi.createReport({
+        reportType: this.REPORT_TYPE,
+        marketplaceIds: [target.amazon_marketplace_id],
+        dataStartTime: dayjs.utc(from).startOf('day').toISOString(),
+        dataEndTime: dayjs.utc(to).endOf('day').toISOString(),
+      });
+
+      const reportId = reportResult.reportId;
+      logger.info('Orders report requested', { reportId, marketplace: target.country_code });
+
+      // 2. Poll until ready
+      let reportDocumentId = null;
+      for (let attempt = 1; attempt <= this.MAX_POLL_ATTEMPTS; attempt++) {
+        await sleep(this.POLL_INTERVAL_MS);
+
+        const report = await spApi.getReport(reportId);
+        const status = report.processingStatus;
+
+        logger.info('Orders report poll', { reportId, status, attempt });
+
+        if (status === 'DONE') {
+          reportDocumentId = report.reportDocumentId;
+          break;
+        }
+
+        if (status === 'FATAL' || status === 'CANCELLED') {
+          throw new Error(`Report ${reportId} failed with status: ${status}`);
+        }
+      }
+
+      if (!reportDocumentId) {
+        throw new Error(`Report ${reportId} timed out after ${this.MAX_POLL_ATTEMPTS} poll attempts`);
+      }
+
+      // 3. Download & parse TSV
+      const doc = await spApi.getReportDocument(reportDocumentId);
+      const response = await axios.get(doc.url, { responseType: 'text' });
+      const reportRows = this.parseTsv(response.data);
+
+      logger.info('Orders report downloaded', {
+        marketplace: target.country_code,
+        totalRows: reportRows.length,
+      });
+
+      // 4. Upsert orders
       let skipped = 0;
-      let page = 0;
       let errors = 0;
-      let loggedSample = false;
 
-      do {
-        page++;
-        const response = await spApi.searchOrders({
-          marketplaceIds: [target.amazon_marketplace_id],
-          createdAfter: from,
-          createdBefore: to,
-          paginationToken,
-        });
+      for (const row of reportRows) {
+        const amazonOrderId = row['amazon-order-id'];
+        const asin = row['asin'];
 
-        // Log raw response structure on first page for diagnostics
-        if (!loggedSample) {
-          const sampleOrder = (response.orders || [])[0];
-          if (sampleOrder) {
-            logger.info('DIAGNOSTIC: v2026 response sample (first order)', {
-              topLevelKeys: Object.keys(response),
-              orderKeys: Object.keys(sampleOrder),
-              orderId: sampleOrder.orderId,
-              fulfillment: JSON.stringify(sampleOrder.fulfillment),
-              orderItems: sampleOrder.orderItems ? sampleOrder.orderItems.length : 'MISSING',
-              firstItemKeys: sampleOrder.orderItems?.[0] ? Object.keys(sampleOrder.orderItems[0]) : 'NO_ITEMS',
-              firstItemProceeds: sampleOrder.orderItems?.[0]?.proceeds ? JSON.stringify(sampleOrder.orderItems[0].proceeds) : 'NO_PROCEEDS',
-              firstItemProduct: sampleOrder.orderItems?.[0]?.product ? JSON.stringify(sampleOrder.orderItems[0].product) : 'NO_PRODUCT',
-              createdTime: sampleOrder.createdTime,
-              rawFirstOrder: JSON.stringify(sampleOrder).substring(0, 2000),
-            });
-          } else {
-            logger.info('DIAGNOSTIC: v2026 response has no orders', {
-              topLevelKeys: Object.keys(response),
-              rawResponse: JSON.stringify(response).substring(0, 1000),
-            });
-          }
-          loggedSample = true;
+        if (!amazonOrderId || !asin) {
+          skipped++;
+          continue;
         }
 
-        const orders = response.orders || [];
-        totalOrders += orders.length;
+        const orderStatus = row['order-status'] || 'UNKNOWN';
 
-        for (const order of orders) {
-          const orderId = order.orderId;
-          const orderStatus = order.fulfillment?.fulfillmentStatus || 'UNKNOWN';
-
-          // Skip if already synced with same status (unless force)
-          if (!force) {
-            const alreadySynced = await this.isOrderSynced(target.account_id, orderId, orderStatus);
-            if (alreadySynced) {
-              skipped++;
-              continue;
-            }
-          }
-
-          try {
-            const items = order.orderItems || [];
-
-            for (const item of items) {
-              processed++;
-              const result = await this.upsertOrderItem(target, order, item);
-              if (result === 'inserted') inserted++;
-
-              await this.ensureAsin(
-                target.account_id,
-                item.product?.asin,
-                item.product?.sellerSku,
-                item.product?.title
-              );
-            }
-          } catch (itemErr) {
-            errors++;
-            logger.warn(`Orders sync ${target.country_code}: failed to process items for ${orderId}`, {
-              error: itemErr.message,
-              orderId,
-              errors,
-            });
+        // Skip if already synced with same status (unless force)
+        if (!force) {
+          const alreadySynced = await this.isOrderSynced(target.account_id, amazonOrderId, orderStatus);
+          if (alreadySynced) {
+            skipped++;
+            continue;
           }
         }
 
-        paginationToken = response.pagination?.nextToken || null;
+        try {
+          processed++;
+          const result = await this.upsertOrderRow(target, row);
+          if (result === 'inserted') inserted++;
 
-        logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed, ${errors} errors`);
-
-        if (paginationToken) {
-          await sleep(2000);
+          await this.ensureAsin(
+            target.account_id,
+            asin,
+            row['sku'] || null,
+            row['product-name'] || null
+          );
+        } catch (err) {
+          errors++;
+          logger.warn('Orders sync: failed to upsert order', {
+            amazonOrderId,
+            asin,
+            error: err.message,
+          });
         }
-      } while (paginationToken);
+      }
 
       // Backfill images for ASINs missing image_url
       await this.backfillImages(target, spApi).catch((err) => {
         logger.warn('Image backfill failed (non-critical)', { error: err.message });
       });
 
-      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0, errors, totalOrders, skipped });
+      await SyncLogger.complete(syncLog.id, { processed, inserted, updated: 0, errors, totalOrders: reportRows.length, skipped });
 
       logger.info('Orders sync completed', {
         accountId: target.account_id,
         marketplace: target.country_code,
-        totalOrders,
+        totalOrders: reportRows.length,
         processed,
         inserted,
         skipped,
         errors,
       });
 
-      return { processed, inserted, errors, totalOrders, skipped };
+      return { processed, inserted, errors, totalOrders: reportRows.length, skipped };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
       logger.error('Orders sync failed', {
@@ -160,6 +164,28 @@ const OrdersService = {
       });
       throw err;
     }
+  },
+
+  /**
+   * Parse TSV report into array of objects.
+   */
+  parseTsv(tsv) {
+    const lines = tsv.split('\n').filter((line) => line.trim().length > 0);
+    if (lines.length < 2) return [];
+
+    const headers = lines[0].split('\t').map((h) => h.trim());
+    const rows = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split('\t');
+      const row = {};
+      for (let j = 0; j < headers.length; j++) {
+        row[headers[j]] = (values[j] || '').trim();
+      }
+      rows.push(row);
+    }
+
+    return rows;
   },
 
   /**
@@ -176,10 +202,20 @@ const OrdersService = {
   },
 
   /**
-   * Upsert a single order item (idempotent via ON CONFLICT).
-   * v2026-01-01 format: item.proceeds.breakdowns[], item.product.asin, etc.
+   * Upsert a single order from a report TSV row.
    */
-  async upsertOrderItem(target, order, item) {
+  async upsertOrderRow(target, row) {
+    const quantity = parseInt(row['quantity'] || '1', 10) || 1;
+    const itemPrice = parseFloat(row['item-price'] || '0') || 0;
+    const itemTax = parseFloat(row['item-tax'] || '0') || 0;
+    const shippingPrice = parseFloat(row['shipping-price'] || '0') || 0;
+    const shippingTax = parseFloat(row['shipping-tax'] || '0') || 0;
+    const promotionDiscount = parseFloat(row['item-promotion-discount'] || '0') || 0;
+    const orderStatus = row['order-status'] || 'UNKNOWN';
+    const purchaseDate = row['purchase-date'];
+    const currency = row['currency'] || target.currency;
+    const sku = row['sku'] || null;
+
     const result = await db.query(
       `INSERT INTO orders_raw (
         account_id, marketplace_id, amazon_order_id, asin, sku,
@@ -201,51 +237,23 @@ const OrdersService = {
       [
         target.account_id,
         target.account_marketplace_id,
-        order.orderId,
-        item.product?.asin,
-        item.product?.sellerSku || null,
-        item.quantityOrdered || 1,
-        this.extractProceeds(item, 'ITEM'),
-        this.extractTax(item, 'ITEM'),
-        this.extractProceeds(item, 'SHIPPING'),
-        this.extractTax(item, 'SHIPPING'),
-        this.extractProceeds(item, 'DISCOUNT'),
-        order.fulfillment?.fulfillmentStatus || 'UNKNOWN',
-        order.createdTime,
-        order.proceeds?.grandTotal?.currencyCode || target.currency,
-        JSON.stringify({ order, item }),
+        row['amazon-order-id'],
+        row['asin'],
+        sku,
+        quantity,
+        itemPrice,
+        itemTax,
+        shippingPrice,
+        shippingTax,
+        promotionDiscount,
+        orderStatus,
+        purchaseDate,
+        currency,
+        JSON.stringify({ source: 'reports-api', report_row: row }),
       ]
     );
 
     return result.rows[0]?.is_insert ? 'inserted' : 'updated';
-  },
-
-  /**
-   * Extract proceeds amount by breakdown type (ITEM, SHIPPING, DISCOUNT).
-   * v2026: item.proceeds.breakdowns[].type / .subtotal.amount
-   */
-  extractProceeds(item, type) {
-    const breakdowns = item.proceeds?.breakdowns || [];
-    const bd = breakdowns.find((b) => b.type === type);
-    return bd?.subtotal ? parseFloat(bd.subtotal.amount || 0) : 0;
-  },
-
-  /**
-   * Extract tax amount by subtype (ITEM, SHIPPING).
-   * v2026: TAX breakdown -> detailedBreakdowns[].subtype / .value.amount
-   */
-  extractTax(item, subtype) {
-    const breakdowns = item.proceeds?.breakdowns || [];
-    const taxBd = breakdowns.find((b) => b.type === 'TAX');
-    if (!taxBd?.detailedBreakdowns) {
-      // Fallback: return total tax for ITEM, 0 otherwise
-      if (subtype === 'ITEM' && taxBd?.subtotal) {
-        return parseFloat(taxBd.subtotal.amount || 0);
-      }
-      return 0;
-    }
-    const detail = taxBd.detailedBreakdowns.find((d) => d.subtype === subtype);
-    return detail?.value ? parseFloat(detail.value.amount || 0) : 0;
   },
 
   /**
