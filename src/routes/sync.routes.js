@@ -1,6 +1,8 @@
 const { Router } = require('express');
 const scheduler = require('../jobs/scheduler');
 const SyncLogger = require('../services/sync-logger');
+const AccountService = require('../modules/accounts/account.service');
+const OrdersReconciliationService = require('../modules/orders/orders-reconciliation.service');
 const validate = require('../middleware/validate');
 const db = require('../database/pool');
 const dayjs = require('dayjs');
@@ -8,6 +10,7 @@ const utc = require('dayjs/plugin/utc');
 dayjs.extend(utc);
 
 const router = Router();
+const logger = require('../utils/logger');
 
 /**
  * POST /api/sync/trigger/compute-range
@@ -90,6 +93,93 @@ router.post('/trigger/compute-range', async (req, res, next) => {
       message: `Compute+aggregate triggered for ${accountTargets.length} marketplace(s)`,
       dateRange: { from: dateFrom, to: dateTo },
       marketplaces: accountTargets.map(t => t.country_code),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/sync/reconcile/orders/:countryCode
+ * Run orders reconciliation (Reports API) for a single marketplace.
+ * Body: { dateFrom: "2026-02-01", dateTo: "2026-03-06" }
+ */
+router.post('/reconcile/orders/:countryCode', async (req, res, next) => {
+  try {
+    const countryCode = req.params.countryCode.toUpperCase();
+    const { dateFrom, dateTo } = req.body || {};
+
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({
+        error: { message: 'dateFrom and dateTo are required (YYYY-MM-DD)' },
+      });
+    }
+
+    const targets = await AccountService.getActiveSyncTargets();
+    const target = targets.find((t) => t.country_code === countryCode);
+
+    if (!target) {
+      return res.status(404).json({
+        error: { message: `No active marketplace found for country code: ${countryCode}` },
+      });
+    }
+
+    OrdersReconciliationService.reconcile(target, { dateFrom, dateTo }).catch((err) => {
+      logger.error('Manual orders reconciliation failed', {
+        marketplace: countryCode,
+        error: err.message,
+      });
+    });
+
+    res.json({
+      success: true,
+      message: `Orders reconciliation started for ${countryCode} (${dateFrom} -> ${dateTo})`,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/sync/backfill/orders/:countryCode
+ * Backfill historical orders using Reports API, split into monthly chunks.
+ * Designed for large date ranges (up to 2+ years).
+ * Body: { dateFrom: "2024-03-01", dateTo: "2026-03-06" }
+ */
+router.post('/backfill/orders/:countryCode', async (req, res, next) => {
+  try {
+    const countryCode = req.params.countryCode.toUpperCase();
+    const { dateFrom, dateTo } = req.body || {};
+
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({
+        error: { message: 'dateFrom and dateTo are required (YYYY-MM-DD)' },
+      });
+    }
+
+    const targets = await AccountService.getActiveSyncTargets();
+    const target = targets.find((t) => t.country_code === countryCode);
+
+    if (!target) {
+      return res.status(404).json({
+        error: { message: `No active marketplace found for country code: ${countryCode}` },
+      });
+    }
+
+    const months = dayjs.utc(dateTo).diff(dayjs.utc(dateFrom), 'month') + 1;
+
+    OrdersReconciliationService.backfill(target, { dateFrom, dateTo }).then((result) => {
+      logger.info('Backfill completed via API', { marketplace: countryCode, ...result });
+    }).catch((err) => {
+      logger.error('Backfill failed via API', {
+        marketplace: countryCode,
+        error: err.message,
+      });
+    });
+
+    res.json({
+      success: true,
+      message: `Orders backfill started for ${countryCode} (${dateFrom} -> ${dateTo}, ~${months} monthly chunks). Check logs for progress.`,
     });
   } catch (err) {
     next(err);

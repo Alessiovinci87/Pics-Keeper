@@ -110,6 +110,36 @@ class SpApiClient {
 
     return this.request('GET', '/finances/v0/financialEvents', params);
   }
+
+  // -------------------------------------------------------
+  // Reports API v2021-06-30
+  // -------------------------------------------------------
+
+  /**
+   * Create a report request.
+   */
+  async createReport({ reportType, marketplaceIds, dataStartTime, dataEndTime }) {
+    return this.request('POST', '/reports/2021-06-30/reports', {
+      reportType,
+      marketplaceIds,
+      dataStartTime,
+      dataEndTime,
+    });
+  }
+
+  /**
+   * Get report status by reportId.
+   */
+  async getReport(reportId) {
+    return this.request('GET', `/reports/2021-06-30/reports/${reportId}`);
+  }
+
+  /**
+   * Get report document download URL.
+   */
+  async getReportDocument(reportDocumentId) {
+    return this.request('GET', `/reports/2021-06-30/documents/${reportDocumentId}`);
+  }
 }
 
 module.exports = SpApiClient;
