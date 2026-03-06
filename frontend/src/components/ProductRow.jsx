@@ -6,6 +6,7 @@ export default function ProductRow({ product, index }) {
   const [expanded, setExpanded] = useState(false);
   const [imgError, setImgError] = useState(false);
 
+
   const p = product;
 
   return (

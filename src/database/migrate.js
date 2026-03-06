@@ -32,7 +32,7 @@ async function runMigrations() {
 
   const files = fs
     .readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith('.sql'))
+    .filter((f) => f.endsWith('.sql') || f.endsWith('.js'))
     .sort();
 
   let count = 0;
@@ -42,13 +42,20 @@ async function runMigrations() {
       continue;
     }
 
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
     logger.info(`Running migration: ${file}`);
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(sql);
+
+      if (file.endsWith('.js')) {
+        const migration = require(path.join(MIGRATIONS_DIR, file));
+        await migration.up(client);
+      } else {
+        const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+        await client.query(sql);
+      }
+
       await client.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
       await client.query('COMMIT');
       logger.info(`Migration completed: ${file}`);

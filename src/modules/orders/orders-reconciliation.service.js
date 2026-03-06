@@ -247,6 +247,74 @@ const OrdersReconciliationService = {
 
     return { inserted, skipped, errors };
   },
+
+  /**
+   * Backfill historical orders by splitting a large date range into monthly chunks.
+   * Each chunk requests a separate report from Amazon, avoiding timeouts on large ranges.
+   * @param {Object} target - from AccountService.getActiveSyncTargets()
+   * @param {Object} options
+   * @param {string} options.dateFrom - YYYY-MM-DD (start of backfill, e.g. "2024-03-01")
+   * @param {string} options.dateTo   - YYYY-MM-DD (end of backfill, e.g. "2026-03-06")
+   * @returns {Object} totals across all chunks
+   */
+  async backfill(target, { dateFrom, dateTo }) {
+    const chunks = [];
+    let cursor = dayjs.utc(dateFrom).startOf('month');
+    const end = dayjs.utc(dateTo);
+
+    // Build monthly chunks
+    while (cursor.isBefore(end)) {
+      const chunkStart = cursor.isBefore(dayjs.utc(dateFrom)) ? dayjs.utc(dateFrom) : cursor;
+      const chunkEnd = cursor.endOf('month').isAfter(end) ? end : cursor.endOf('month');
+      chunks.push({
+        dateFrom: chunkStart.format('YYYY-MM-DD'),
+        dateTo: chunkEnd.format('YYYY-MM-DD'),
+      });
+      cursor = cursor.add(1, 'month').startOf('month');
+    }
+
+    logger.info('Backfill starting', {
+      marketplace: target.country_code,
+      dateFrom,
+      dateTo,
+      totalChunks: chunks.length,
+    });
+
+    const totals = { chunks: chunks.length, completedChunks: 0, reportRows: 0, inserted: 0, skipped: 0, errors: 0, failedChunks: [] };
+
+    for (const chunk of chunks) {
+      try {
+        logger.info(`Backfill chunk ${totals.completedChunks + 1}/${chunks.length}`, {
+          marketplace: target.country_code,
+          ...chunk,
+        });
+
+        const result = await this.reconcile(target, chunk);
+        totals.reportRows += result.reportRows;
+        totals.inserted += result.inserted;
+        totals.skipped += result.skipped;
+        totals.errors += result.errors;
+        totals.completedChunks++;
+      } catch (err) {
+        logger.error('Backfill chunk failed', {
+          marketplace: target.country_code,
+          chunk,
+          error: err.message,
+        });
+        totals.failedChunks.push({ ...chunk, error: err.message });
+      }
+
+      // Pause between chunks to avoid rate limits
+      await sleep(5000);
+    }
+
+    logger.info('Backfill completed', {
+      marketplace: target.country_code,
+      ...totals,
+    });
+
+    return totals;
+  },
 };
 
 module.exports = OrdersReconciliationService;

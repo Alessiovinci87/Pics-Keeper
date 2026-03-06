@@ -7,6 +7,7 @@ const cashRoutes = require('./cash.routes');
 const asinCostRoutes = require('./asin-cost.routes');
 const syncRoutes = require('./sync.routes');
 const diagnosticsRoutes = require('./diagnostics.routes');
+const reconciliationRoutes = require('./reconciliation.routes');
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use('/cash', cashRoutes);
 router.use('/asin-costs', asinCostRoutes);
 router.use('/sync', syncRoutes);
 router.use('/diagnostics', diagnosticsRoutes);
+router.use('/reconciliation', reconciliationRoutes);
 
 module.exports = router;
