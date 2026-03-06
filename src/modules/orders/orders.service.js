@@ -9,7 +9,7 @@ dayjs.extend(utc);
 
 /**
  * Orders Sync Service - incrementally fetches orders from Amazon SP-API.
- * Uses Orders API v0 (getOrders + getOrderItems).
+ * Uses Orders API v2026-01-01 (searchOrders) with embedded items + proceeds.
  * Idempotent: uses ON CONFLICT to prevent duplicates.
  */
 const OrdersService = {
@@ -30,11 +30,11 @@ const OrdersService = {
         ({ from, to } = syncDateRange(target.last_orders_sync_at, 30));
       }
 
-      // SP-API requires CreatedBefore to be at least 2 minutes in the past
+      // SP-API requires createdBefore to be at least 2 minutes in the past
       const maxTo = dayjs.utc().subtract(3, 'minute');
       to = dayjs.utc(to).isAfter(maxTo) ? maxTo.toISOString() : dayjs.utc(to).toISOString();
 
-      logger.info('Starting orders sync (v0 API)', {
+      logger.info('Starting orders sync (v2026 API)', {
         accountId: target.account_id,
         marketplace: target.country_code,
         from,
@@ -42,29 +42,55 @@ const OrdersService = {
       });
 
       const spApi = new SpApiClient(target);
-      let nextToken = null;
+      let paginationToken = null;
       let totalOrders = 0;
       let skipped = 0;
       let page = 0;
       let errors = 0;
+      let loggedSample = false;
 
       do {
         page++;
-        const response = await spApi.getOrders({
-          MarketplaceIds: [target.amazon_marketplace_id],
-          CreatedAfter: from,
-          CreatedBefore: to,
-          NextToken: nextToken,
+        const response = await spApi.searchOrders({
+          marketplaceIds: [target.amazon_marketplace_id],
+          createdAfter: from,
+          createdBefore: to,
+          paginationToken,
         });
 
-        const orders = response.Orders || [];
+        // Log raw response structure on first page for diagnostics
+        if (!loggedSample) {
+          const sampleOrder = (response.orders || [])[0];
+          if (sampleOrder) {
+            logger.info('DIAGNOSTIC: v2026 response sample (first order)', {
+              topLevelKeys: Object.keys(response),
+              orderKeys: Object.keys(sampleOrder),
+              orderId: sampleOrder.orderId,
+              fulfillment: JSON.stringify(sampleOrder.fulfillment),
+              orderItems: sampleOrder.orderItems ? sampleOrder.orderItems.length : 'MISSING',
+              firstItemKeys: sampleOrder.orderItems?.[0] ? Object.keys(sampleOrder.orderItems[0]) : 'NO_ITEMS',
+              firstItemProceeds: sampleOrder.orderItems?.[0]?.proceeds ? JSON.stringify(sampleOrder.orderItems[0].proceeds) : 'NO_PROCEEDS',
+              firstItemProduct: sampleOrder.orderItems?.[0]?.product ? JSON.stringify(sampleOrder.orderItems[0].product) : 'NO_PRODUCT',
+              createdTime: sampleOrder.createdTime,
+              rawFirstOrder: JSON.stringify(sampleOrder).substring(0, 2000),
+            });
+          } else {
+            logger.info('DIAGNOSTIC: v2026 response has no orders', {
+              topLevelKeys: Object.keys(response),
+              rawResponse: JSON.stringify(response).substring(0, 1000),
+            });
+          }
+          loggedSample = true;
+        }
+
+        const orders = response.orders || [];
         totalOrders += orders.length;
 
         for (const order of orders) {
-          const orderId = order.AmazonOrderId;
-          const orderStatus = order.OrderStatus || 'UNKNOWN';
+          const orderId = order.orderId;
+          const orderStatus = order.fulfillment?.fulfillmentStatus || 'UNKNOWN';
 
-          // Skip if already synced with same status (unless --force)
+          // Skip if already synced with same status (unless force)
           if (!force) {
             const alreadySynced = await this.isOrderSynced(target.account_id, orderId, orderStatus);
             if (alreadySynced) {
@@ -74,8 +100,7 @@ const OrdersService = {
           }
 
           try {
-            // v0: fetch items separately for each order
-            const items = await spApi.getOrderItems(orderId);
+            const items = order.orderItems || [];
 
             for (const item of items) {
               processed++;
@@ -84,14 +109,11 @@ const OrdersService = {
 
               await this.ensureAsin(
                 target.account_id,
-                item.ASIN,
-                item.SellerSKU,
-                item.Title
+                item.product?.asin,
+                item.product?.sellerSku,
+                item.product?.title
               );
             }
-
-            // Throttle between getOrderItems calls
-            await sleep(500);
           } catch (itemErr) {
             errors++;
             logger.warn(`Orders sync ${target.country_code}: failed to process items for ${orderId}`, {
@@ -102,14 +124,14 @@ const OrdersService = {
           }
         }
 
-        nextToken = response.NextToken || null;
+        paginationToken = response.pagination?.nextToken || null;
 
         logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed, ${errors} errors`);
 
-        if (nextToken) {
+        if (paginationToken) {
           await sleep(2000);
         }
-      } while (nextToken);
+      } while (paginationToken);
 
       // Backfill images for ASINs missing image_url
       await this.backfillImages(target, spApi).catch((err) => {
@@ -155,7 +177,7 @@ const OrdersService = {
 
   /**
    * Upsert a single order item (idempotent via ON CONFLICT).
-   * Uses Orders API v0 response format.
+   * v2026-01-01 format: item.proceeds.breakdowns[], item.product.asin, etc.
    */
   async upsertOrderItem(target, order, item) {
     const result = await db.query(
@@ -179,18 +201,18 @@ const OrdersService = {
       [
         target.account_id,
         target.account_marketplace_id,
-        order.AmazonOrderId,
-        item.ASIN,
-        item.SellerSKU || null,
-        item.QuantityOrdered || 1,
-        this.extractAmount(item.ItemPrice),
-        this.extractAmount(item.ItemTax),
-        this.extractAmount(item.ShippingPrice),
-        this.extractAmount(item.ShippingTax),
-        this.extractAmount(item.PromotionDiscount),
-        order.OrderStatus || 'UNKNOWN',
-        order.PurchaseDate,
-        item.ItemPrice?.CurrencyCode || order.Currency || target.currency,
+        order.orderId,
+        item.product?.asin,
+        item.product?.sellerSku || null,
+        item.quantityOrdered || 1,
+        this.extractProceeds(item, 'ITEM'),
+        this.extractTax(item, 'ITEM'),
+        this.extractProceeds(item, 'SHIPPING'),
+        this.extractTax(item, 'SHIPPING'),
+        this.extractProceeds(item, 'DISCOUNT'),
+        order.fulfillment?.fulfillmentStatus || 'UNKNOWN',
+        order.createdTime,
+        order.proceeds?.grandTotal?.currencyCode || target.currency,
         JSON.stringify({ order, item }),
       ]
     );
@@ -199,11 +221,31 @@ const OrdersService = {
   },
 
   /**
-   * Extract amount from SP-API v0 Money object { CurrencyCode, Amount }.
+   * Extract proceeds amount by breakdown type (ITEM, SHIPPING, DISCOUNT).
+   * v2026: item.proceeds.breakdowns[].type / .subtotal.amount
    */
-  extractAmount(money) {
-    if (!money || !money.Amount) return 0;
-    return parseFloat(money.Amount) || 0;
+  extractProceeds(item, type) {
+    const breakdowns = item.proceeds?.breakdowns || [];
+    const bd = breakdowns.find((b) => b.type === type);
+    return bd?.subtotal ? parseFloat(bd.subtotal.amount || 0) : 0;
+  },
+
+  /**
+   * Extract tax amount by subtype (ITEM, SHIPPING).
+   * v2026: TAX breakdown -> detailedBreakdowns[].subtype / .value.amount
+   */
+  extractTax(item, subtype) {
+    const breakdowns = item.proceeds?.breakdowns || [];
+    const taxBd = breakdowns.find((b) => b.type === 'TAX');
+    if (!taxBd?.detailedBreakdowns) {
+      // Fallback: return total tax for ITEM, 0 otherwise
+      if (subtype === 'ITEM' && taxBd?.subtotal) {
+        return parseFloat(taxBd.subtotal.amount || 0);
+      }
+      return 0;
+    }
+    const detail = taxBd.detailedBreakdowns.find((d) => d.subtype === subtype);
+    return detail?.value ? parseFloat(detail.value.amount || 0) : 0;
   },
 
   /**
