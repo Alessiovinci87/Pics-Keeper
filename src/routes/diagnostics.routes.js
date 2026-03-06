@@ -958,4 +958,88 @@ router.get(
   }
 );
 
+/**
+ * GET /api/diagnostics/fee-cutoff
+ * Find the latest order purchase_date that has financial events.
+ * Shows where the "gap" starts.
+ *
+ * Query params: accountId (required)
+ */
+router.get(
+  '/fee-cutoff',
+  validate({ query: ['accountId'] }),
+  async (req, res, next) => {
+    try {
+      const db = require('../database/pool');
+      const accountId = parseInt(req.query.accountId, 10);
+
+      // Latest order date WITH financial events
+      const latestWithFe = await db.query(
+        `SELECT o.purchase_date, o.amazon_order_id, o.asin, o.marketplace_id, m.country_code
+         FROM orders_raw o
+         JOIN marketplaces m ON m.id = o.marketplace_id
+         WHERE o.account_id = $1
+           AND EXISTS (
+             SELECT 1 FROM financial_events_raw fe
+             WHERE fe.amazon_order_id = o.amazon_order_id
+               AND fe.account_id = o.account_id
+           )
+         ORDER BY o.purchase_date DESC
+         LIMIT 5`,
+        [accountId]
+      );
+
+      // Earliest order date WITHOUT financial events (after the cutoff)
+      const earliestWithoutFe = await db.query(
+        `SELECT o.purchase_date, o.amazon_order_id, o.asin, o.marketplace_id, m.country_code
+         FROM orders_raw o
+         JOIN marketplaces m ON m.id = o.marketplace_id
+         WHERE o.account_id = $1
+           AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+           AND NOT EXISTS (
+             SELECT 1 FROM financial_events_raw fe
+             WHERE fe.amazon_order_id = o.amazon_order_id
+               AND fe.account_id = o.account_id
+           )
+         ORDER BY o.purchase_date DESC
+         LIMIT 5`,
+        [accountId]
+      );
+
+      // Per-date coverage for the last 10 days
+      const dailyCoverage = await db.query(
+        `SELECT d.day::date AS order_date,
+                COUNT(DISTINCT o.amazon_order_id) AS total_orders,
+                COUNT(DISTINCT o.amazon_order_id) FILTER (
+                  WHERE EXISTS (
+                    SELECT 1 FROM financial_events_raw fe
+                    WHERE fe.amazon_order_id = o.amazon_order_id
+                      AND fe.account_id = o.account_id
+                  )
+                ) AS orders_with_fe
+         FROM generate_series(
+           CURRENT_DATE - INTERVAL '10 days',
+           CURRENT_DATE,
+           '1 day'
+         ) d(day)
+         LEFT JOIN orders_raw o
+           ON o.account_id = $1
+           AND o.purchase_date::date = d.day::date
+           AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+         GROUP BY d.day
+         ORDER BY d.day DESC`,
+        [accountId]
+      );
+
+      res.json({
+        latestOrdersWithFinancialEvents: latestWithFe.rows,
+        latestOrdersWithoutFinancialEvents: earliestWithoutFe.rows,
+        dailyCoverage: dailyCoverage.rows,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
