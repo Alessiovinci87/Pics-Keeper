@@ -556,4 +556,147 @@ router.get(
   }
 );
 
+/**
+ * GET /api/diagnostics/financial-check
+ * Quick check: are there financial events in the DB? Do they match orders?
+ *
+ * Query params:
+ *   accountId (required), date (required, YYYY-MM-DD)
+ *
+ * Example:
+ *   /api/diagnostics/financial-check?accountId=1&date=2026-03-03
+ */
+router.get(
+  '/financial-check',
+  validate({ query: ['accountId', 'date'] }),
+  async (req, res, next) => {
+    try {
+      const db = require('../database/pool');
+      const accountId = parseInt(req.query.accountId, 10);
+      const { date } = req.query;
+
+      const dayjs = require('dayjs');
+      const dateFrom = dayjs(date).subtract(30, 'day').format('YYYY-MM-DD');
+      const dateTo = dayjs(date).add(31, 'day').format('YYYY-MM-DD');
+
+      // 1. Total financial events for this account
+      const totalEvents = await db.query(
+        `SELECT COUNT(*) AS total,
+                COUNT(DISTINCT amazon_order_id) AS distinct_orders,
+                MIN(event_date) AS earliest,
+                MAX(event_date) AS latest
+         FROM financial_events_raw
+         WHERE account_id = $1`,
+        [accountId]
+      );
+
+      // 2. Financial events around the target date (±30 days)
+      const nearDateEvents = await db.query(
+        `SELECT COUNT(*) AS total,
+                COUNT(DISTINCT amazon_order_id) AS distinct_orders,
+                COUNT(DISTINCT event_type) AS distinct_event_types
+         FROM financial_events_raw
+         WHERE account_id = $1
+           AND event_date >= $2 AND event_date < $3`,
+        [accountId, dateFrom, dateTo]
+      );
+
+      // 3. Event types breakdown
+      const eventTypes = await db.query(
+        `SELECT event_type, fee_type, COUNT(*) AS cnt,
+                SUM(amount) AS total_amount
+         FROM financial_events_raw
+         WHERE account_id = $1
+           AND event_date >= $2 AND event_date < $3
+         GROUP BY event_type, fee_type
+         ORDER BY cnt DESC
+         LIMIT 30`,
+        [accountId, dateFrom, dateTo]
+      );
+
+      // 4. ASIN format check: how many look like ASINs vs SKUs
+      const asinFormats = await db.query(
+        `SELECT
+           COUNT(*) AS total,
+           COUNT(*) FILTER (WHERE asin ~ '^B[A-Z0-9]{9}$') AS asin_format,
+           COUNT(*) FILTER (WHERE asin !~ '^B[A-Z0-9]{9}$' AND asin IS NOT NULL) AS sku_format,
+           COUNT(*) FILTER (WHERE asin IS NULL) AS null_asin
+         FROM financial_events_raw
+         WHERE account_id = $1
+           AND event_date >= $2 AND event_date < $3`,
+        [accountId, dateFrom, dateTo]
+      );
+
+      // 5. Join test: how many financial events match orders via the buildFeeMap join
+      const joinTest = await db.query(
+        `SELECT COUNT(*) AS matched_rows,
+                COUNT(DISTINCT fe.amazon_order_id) AS matched_orders
+         FROM financial_events_raw fe
+         JOIN orders_raw o
+           ON o.amazon_order_id = fe.amazon_order_id
+           AND o.account_id = fe.account_id
+           AND (o.asin = fe.asin OR o.sku = fe.asin)
+         WHERE fe.account_id = $1
+           AND fe.event_date >= $2 AND fe.event_date < $3
+           AND fe.event_type = 'ShipmentEvent'
+           AND fe.amount < 0`,
+        [accountId, dateFrom, dateTo]
+      );
+
+      // 6. Unmatched financial events (orders exist but ASIN/SKU doesn't match)
+      const unmatchedTest = await db.query(
+        `SELECT COUNT(*) AS unmatched_rows,
+                COUNT(DISTINCT fe.amazon_order_id) AS unmatched_orders
+         FROM financial_events_raw fe
+         WHERE fe.account_id = $1
+           AND fe.event_date >= $2 AND fe.event_date < $3
+           AND fe.event_type = 'ShipmentEvent'
+           AND fe.amount < 0
+           AND NOT EXISTS (
+             SELECT 1 FROM orders_raw o
+             WHERE o.amazon_order_id = fe.amazon_order_id
+               AND o.account_id = fe.account_id
+               AND (o.asin = fe.asin OR o.sku = fe.asin)
+           )`,
+        [accountId, dateFrom, dateTo]
+      );
+
+      // 7. Sample unmatched: show fe.asin vs o.asin/o.sku for debugging
+      const sampleUnmatched = await db.query(
+        `SELECT fe.amazon_order_id, fe.asin AS fe_asin, fe.fee_type, fe.amount,
+                o.asin AS order_asin, o.sku AS order_sku
+         FROM financial_events_raw fe
+         LEFT JOIN orders_raw o
+           ON o.amazon_order_id = fe.amazon_order_id
+           AND o.account_id = fe.account_id
+         WHERE fe.account_id = $1
+           AND fe.event_date >= $2 AND fe.event_date < $3
+           AND fe.event_type = 'ShipmentEvent'
+           AND fe.amount < 0
+           AND NOT EXISTS (
+             SELECT 1 FROM orders_raw o2
+             WHERE o2.amazon_order_id = fe.amazon_order_id
+               AND o2.account_id = fe.account_id
+               AND (o2.asin = fe.asin OR o2.sku = fe.asin)
+           )
+         LIMIT 10`,
+        [accountId, dateFrom, dateTo]
+      );
+
+      res.json({
+        params: { accountId, date, searchRange: { from: dateFrom, to: dateTo } },
+        overall: totalEvents.rows[0],
+        nearDate: nearDateEvents.rows[0],
+        eventTypes: eventTypes.rows,
+        asinFormats: asinFormats.rows[0],
+        joinTest: joinTest.rows[0],
+        unmatchedFees: unmatchedTest.rows[0],
+        sampleUnmatched: sampleUnmatched.rows,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
