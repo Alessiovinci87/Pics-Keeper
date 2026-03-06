@@ -699,4 +699,124 @@ router.get(
   }
 );
 
+/**
+ * GET /api/diagnostics/feemap-test
+ * Simulates buildFeeMap for a specific date and shows what it returns.
+ * This is the exact same query the profit engine uses.
+ *
+ * Query params:
+ *   accountId (required), marketplaceId (required), date (required)
+ *
+ * Example:
+ *   /api/diagnostics/feemap-test?accountId=1&marketplaceId=3&date=2026-03-03
+ */
+router.get(
+  '/feemap-test',
+  validate({ query: ['accountId', 'marketplaceId', 'date'] }),
+  async (req, res, next) => {
+    try {
+      const db = require('../database/pool');
+      const dayjs = require('dayjs');
+      const accountId = parseInt(req.query.accountId, 10);
+      const marketplaceId = parseInt(req.query.marketplaceId, 10);
+      const { date } = req.query;
+
+      // Same date range logic as computeForRange
+      const dateFrom = date;
+      const dateTo = dayjs(date).add(1, 'day').format('YYYY-MM-DD');
+      const feeFrom = dayjs(dateFrom).subtract(30, 'day').format('YYYY-MM-DD');
+      const feeTo = dayjs(dateTo).add(30, 'day').format('YYYY-MM-DD');
+
+      // 1. Exact buildFeeMap query
+      const feeMapResult = await db.query(
+        `SELECT fe.amazon_order_id,
+                COALESCE(o.asin, fe.asin) AS asin,
+                fe.fee_type,
+                SUM(fe.amount) AS total_amount
+         FROM financial_events_raw fe
+         JOIN orders_raw o
+           ON o.amazon_order_id = fe.amazon_order_id
+           AND o.account_id = fe.account_id
+           AND (o.asin = fe.asin OR o.sku = fe.asin)
+         WHERE fe.account_id = $1
+           AND o.marketplace_id = $2
+           AND fe.event_date >= $3 AND fe.event_date < $4
+           AND fe.event_type = 'ShipmentEvent'
+           AND fe.amount < 0
+         GROUP BY fe.amazon_order_id, COALESCE(o.asin, fe.asin), fe.fee_type
+         LIMIT 20`,
+        [accountId, marketplaceId, feeFrom, feeTo]
+      );
+
+      // 2. Count of orders on this date
+      const ordersOnDate = await db.query(
+        `SELECT COUNT(*) AS total,
+                COUNT(DISTINCT amazon_order_id) AS distinct_orders
+         FROM orders_raw
+         WHERE account_id = $1 AND marketplace_id = $2
+           AND purchase_date::date >= $3::date
+           AND purchase_date::date < $4::date`,
+        [accountId, marketplaceId, dateFrom, dateTo]
+      );
+
+      // 3. Pick one order from that date and check its financial events
+      const sampleOrder = await db.query(
+        `SELECT amazon_order_id, asin, sku
+         FROM orders_raw
+         WHERE account_id = $1 AND marketplace_id = $2
+           AND purchase_date::date >= $3::date
+           AND purchase_date::date < $4::date
+         LIMIT 1`,
+        [accountId, marketplaceId, dateFrom, dateTo]
+      );
+
+      let sampleFees = null;
+      if (sampleOrder.rows.length > 0) {
+        const sample = sampleOrder.rows[0];
+        sampleFees = await db.query(
+          `SELECT fe.amazon_order_id, fe.asin AS fe_asin, fe.fee_type, fe.amount, fe.event_date,
+                  o.asin AS order_asin, o.sku AS order_sku, o.marketplace_id AS order_mp
+           FROM financial_events_raw fe
+           LEFT JOIN orders_raw o
+             ON o.amazon_order_id = fe.amazon_order_id
+             AND o.account_id = fe.account_id
+           WHERE fe.account_id = $1
+             AND fe.amazon_order_id = $2
+           ORDER BY fe.fee_type
+           LIMIT 20`,
+          [accountId, sample.amazon_order_id]
+        );
+      }
+
+      // 4. Total feeMap entries (no LIMIT)
+      const feeMapCount = await db.query(
+        `SELECT COUNT(*) AS total_fee_entries,
+                COUNT(DISTINCT fe.amazon_order_id) AS matched_orders
+         FROM financial_events_raw fe
+         JOIN orders_raw o
+           ON o.amazon_order_id = fe.amazon_order_id
+           AND o.account_id = fe.account_id
+           AND (o.asin = fe.asin OR o.sku = fe.asin)
+         WHERE fe.account_id = $1
+           AND o.marketplace_id = $2
+           AND fe.event_date >= $3 AND fe.event_date < $4
+           AND fe.event_type = 'ShipmentEvent'
+           AND fe.amount < 0`,
+        [accountId, marketplaceId, feeFrom, feeTo]
+      );
+
+      res.json({
+        params: { accountId, marketplaceId, date, feeFrom, feeTo },
+        ordersOnDate: ordersOnDate.rows[0],
+        feeMapCount: feeMapCount.rows[0],
+        feeMapSample: feeMapResult.rows,
+        sampleOrder: sampleOrder.rows[0] || null,
+        sampleOrderFees: sampleFees?.rows || null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
