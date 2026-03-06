@@ -24,6 +24,11 @@ const config = {
     clientSecret: process.env.ADS_API_CLIENT_SECRET || '',
   },
 
+  sync: {
+    maxDaysBack: parseInt(process.env.SYNC_MAX_DAYS_BACK, 10) || 30,
+    profitDaysBack: parseInt(process.env.PROFIT_DAYS_BACK, 10) || 30,
+  },
+
   cron: {
     syncOrders: process.env.SYNC_ORDERS_CRON || '*/10 * * * *',
     syncFinancial: process.env.SYNC_FINANCIAL_CRON || '*/15 * * * *',

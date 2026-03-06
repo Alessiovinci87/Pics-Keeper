@@ -1,4 +1,5 @@
 const db = require('../../database/pool');
+const config = require('../../config');
 const logger = require('../../utils/logger');
 const { syncDateRange, toDateStr } = require('../../utils/helpers');
 const AdsApiClient = require('../../services/ads-api.client');
@@ -19,7 +20,7 @@ const AdsService = {
     let inserted = 0;
 
     try {
-      const { from, to } = syncDateRange(target.last_ads_sync_at, 14);
+      const { from, to } = syncDateRange(target.last_ads_sync_at, config.sync.maxDaysBack);
 
       logger.info('Starting ads sync', {
         accountId: target.account_id,
@@ -28,23 +29,45 @@ const AdsService = {
         to: toDateStr(to),
       });
 
+      // Validate profile ID before making API calls
+      const profileId = this.getProfileId(target, target.country_code);
+      if (!profileId) {
+        logger.warn('No Ads profile ID configured for this marketplace, skipping ads sync', {
+          accountId: target.account_id,
+          countryCode: target.country_code,
+          hint: 'Set ads_profile_ids in the account record: [{countryCode: "XX", profileId: "123"}]',
+        });
+        await SyncLogger.complete(syncLog.id, { processed: 0, inserted: 0, updated: 0 });
+        return { processed: 0, inserted: 0 };
+      }
+
       const adsClient = new AdsApiClient(target);
 
       // Fetch reports for each campaign type: SP, SB, SD
       const campaignTypes = ['SP', 'SB', 'SD'];
 
       for (const campaignType of campaignTypes) {
-        const report = await adsClient.getAsinDailyReport({
-          profileId: this.getProfileId(target, target.country_code),
-          campaignType,
-          startDate: toDateStr(from),
-          endDate: toDateStr(to),
-        });
+        try {
+          const report = await adsClient.getAsinDailyReport({
+            profileId,
+            campaignType,
+            startDate: toDateStr(from),
+            endDate: toDateStr(to),
+          });
 
-        for (const row of report) {
-          processed++;
-          const result = await this.upsertAdsDailySpend(target, row, campaignType);
-          if (result === 'inserted') inserted++;
+          for (const row of report) {
+            processed++;
+            const result = await this.upsertAdsDailySpend(target, row, campaignType);
+            if (result === 'inserted') inserted++;
+          }
+        } catch (err) {
+          // Log per-campaign-type failure but continue with other types
+          logger.error('Ads report failed for campaign type', {
+            accountId: target.account_id,
+            countryCode: target.country_code,
+            campaignType,
+            error: err.message,
+          });
         }
       }
 
@@ -80,6 +103,8 @@ const AdsService = {
 
   /**
    * Upsert a single daily ads spend row.
+   * Handles both v3 API field names (spend, sales14d, purchases14d)
+   * and legacy field names (cost, sales, purchases) as fallback.
    */
   async upsertAdsDailySpend(target, row, campaignType) {
     const result = await db.query(
@@ -105,9 +130,9 @@ const AdsService = {
         row.date,
         row.impressions || 0,
         row.clicks || 0,
-        parseFloat(row.cost || row.spend || 0),
-        parseFloat(row.sales || row.attributedSales || 0),
-        row.orders || row.attributedOrders || 0,
+        parseFloat(row.spend || row.cost || 0),
+        parseFloat(row.sales14d || row.sales || 0),
+        row.purchases14d || row.purchases || row.orders || 0,
         target.currency,
         campaignType,
         JSON.stringify(row),

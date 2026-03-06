@@ -58,16 +58,16 @@ const AggregationService = {
         SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated) AS total_product_costs,
         SUM(op.net_profit) AS net_profit,
         CASE WHEN SUM(op.revenue) > 0
-          THEN ROUND((SUM(op.net_profit) / SUM(op.revenue)) * 100, 4)
+          THEN LEAST(GREATEST(ROUND((SUM(op.net_profit) / SUM(op.revenue)) * 100, 4), -9999), 9999)
           ELSE 0 END AS margin_pct,
         CASE WHEN SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated + op.ads_allocated) > 0
-          THEN ROUND((SUM(op.net_profit) / SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated + op.ads_allocated)) * 100, 4)
+          THEN LEAST(GREATEST(ROUND((SUM(op.net_profit) / SUM(op.product_cost + op.inbound_cost + op.customs_cost + op.prep_cost + op.packaging_cost + op.storage_allocated + op.ads_allocated)) * 100, 4), -9999), 9999)
           ELSE 0 END AS roi_pct,
         CASE WHEN COALESCE(ads.total_sales, 0) > 0
-          THEN ROUND((COALESCE(ads.total_spend, 0) / ads.total_sales) * 100, 4)
+          THEN LEAST(ROUND((COALESCE(ads.total_spend, 0) / ads.total_sales) * 100, 4), 9999)
           ELSE 0 END AS acos_pct,
         CASE WHEN SUM(op.revenue) > 0
-          THEN ROUND((COALESCE(ads.total_spend, 0) / SUM(op.revenue)) * 100, 4)
+          THEN LEAST(ROUND((COALESCE(ads.total_spend, 0) / SUM(op.revenue)) * 100, 4), 9999)
           ELSE 0 END AS tacos_pct,
         op.currency,
         NOW() AS computed_at
@@ -105,7 +105,60 @@ const AggregationService = {
       [accountId, marketplaceId, dateFrom, dateTo]
     );
 
-    logger.debug('ASIN daily metrics aggregated', { accountId, marketplaceId });
+    // Second pass: include ads-only rows (ASINs with ads spend but no orders).
+    // Without this, marketplaces where you run PPC without sales would be invisible.
+    await db.query(
+      `INSERT INTO asin_daily_metrics (
+        account_id, marketplace_id, asin, metric_date,
+        units_sold, orders_count, revenue, total_amazon_fees, refunds,
+        ads_spend, total_product_costs, net_profit,
+        margin_pct, roi_pct, acos_pct, tacos_pct, currency, computed_at
+      )
+      SELECT
+        ads.account_id,
+        ads.marketplace_id,
+        ads.asin,
+        ads.spend_date AS metric_date,
+        0 AS units_sold,
+        0 AS orders_count,
+        0 AS revenue,
+        0 AS total_amazon_fees,
+        0 AS refunds,
+        SUM(ads.spend) AS ads_spend,
+        0 AS total_product_costs,
+        -SUM(ads.spend) AS net_profit,
+        0 AS margin_pct,
+        0 AS roi_pct,
+        CASE WHEN SUM(ads.sales) > 0
+          THEN LEAST(ROUND((SUM(ads.spend) / SUM(ads.sales)) * 100, 4), 9999)
+          ELSE 0 END AS acos_pct,
+        0 AS tacos_pct,
+        ads.currency,
+        NOW() AS computed_at
+      FROM ads_daily_spend ads
+      WHERE ads.account_id = $1
+        AND ads.marketplace_id = $2
+        AND ads.spend_date >= $3::date
+        AND ads.spend_date < $4::date
+        AND NOT EXISTS (
+          SELECT 1 FROM order_profit op
+          WHERE op.account_id = ads.account_id
+            AND op.marketplace_id = ads.marketplace_id
+            AND op.asin = ads.asin
+            AND op.order_date = ads.spend_date
+        )
+      GROUP BY ads.account_id, ads.marketplace_id, ads.asin, ads.spend_date, ads.currency
+      ON CONFLICT (account_id, marketplace_id, asin, metric_date) DO UPDATE SET
+        ads_spend = EXCLUDED.ads_spend,
+        acos_pct = EXCLUDED.acos_pct,
+        tacos_pct = CASE WHEN asin_daily_metrics.revenue > 0
+          THEN LEAST(ROUND((EXCLUDED.ads_spend / asin_daily_metrics.revenue) * 100, 4), 9999)
+          ELSE 0 END,
+        computed_at = NOW()`,
+      [accountId, marketplaceId, dateFrom, dateTo]
+    );
+
+    logger.debug('ASIN daily metrics aggregated (incl. ads-only)', { accountId, marketplaceId });
   },
 
   /**
@@ -132,13 +185,13 @@ const AggregationService = {
         SUM(total_product_costs),
         SUM(net_profit),
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(total_product_costs + ads_spend) > 0
-          THEN ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(ads_spend) > 0 AND SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         currency,
         NOW()
       FROM asin_daily_metrics
@@ -189,13 +242,13 @@ const AggregationService = {
         SUM(total_product_costs),
         SUM(net_profit),
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(revenue)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(total_product_costs + ads_spend) > 0
-          THEN ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4) ELSE 0 END,
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(total_product_costs + ads_spend)) * 100, 4), -9999), 9999) ELSE 0 END,
         CASE WHEN SUM(ads_spend) > 0 AND SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4) ELSE 0 END,
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 4), 9999) ELSE 0 END,
         'EUR',
         NOW()
       FROM account_daily_kpi
@@ -203,7 +256,7 @@ const AggregationService = {
         AND marketplace_id IS NOT NULL
         AND kpi_date >= $2 AND kpi_date < $3
       GROUP BY account_id, kpi_date
-      ON CONFLICT (account_id, marketplace_id, kpi_date) DO UPDATE SET
+      ON CONFLICT (account_id, kpi_date) WHERE marketplace_id IS NULL DO UPDATE SET
         units_sold = EXCLUDED.units_sold,
         orders_count = EXCLUDED.orders_count,
         revenue = EXCLUDED.revenue,
@@ -483,10 +536,10 @@ const AggregationService = {
         SUM(net_profit) AS total_profit,
         SUM(ads_spend) AS total_ads_spend,
         CASE WHEN SUM(revenue) > 0
-          THEN ROUND((SUM(net_profit) / SUM(revenue)) * 100, 2)
+          THEN LEAST(GREATEST(ROUND((SUM(net_profit) / SUM(revenue)) * 100, 2), -9999), 9999)
           ELSE 0 END AS avg_margin,
         CASE WHEN SUM(ads_spend) > 0 AND SUM(revenue) > 0
-          THEN ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 2)
+          THEN LEAST(ROUND((SUM(ads_spend) / SUM(revenue)) * 100, 2), 9999)
           ELSE 0 END AS avg_tacos
        FROM account_daily_kpi adk
        WHERE ${conditions.join(' AND ')}`,
