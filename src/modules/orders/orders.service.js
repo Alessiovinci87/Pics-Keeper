@@ -9,7 +9,7 @@ dayjs.extend(utc);
 
 /**
  * Orders Sync Service - incrementally fetches orders from Amazon SP-API.
- * Uses Orders API v2026-01-01 (searchOrders) which returns items + proceeds inline.
+ * Uses Orders API v0 (getOrders + getOrderItems).
  * Idempotent: uses ON CONFLICT to prevent duplicates.
  */
 const OrdersService = {
@@ -18,6 +18,8 @@ const OrdersService = {
    * @param {Object} target - account+marketplace target
    * @param {Object} [options]
    * @param {string} [options.dateFrom] - override start date (YYYY-MM-DD) for manual resync
+   * @param {string} [options.dateTo] - override end date (YYYY-MM-DD)
+   * @param {boolean} [options.force] - bypass skip-if-synced check
    */
   async syncOrders(target, { dateFrom: overrideFrom, dateTo: overrideTo, force = false } = {}) {
     const syncLog = await SyncLogger.start(target.account_id, target.account_marketplace_id, 'orders');
@@ -34,7 +36,7 @@ const OrdersService = {
         ({ from, to } = syncDateRange(target.last_orders_sync_at, 30));
       }
 
-      // SP-API requires createdBefore to be at least 2 minutes in the past
+      // SP-API requires CreatedBefore to be at least 2 minutes in the past
       // Cap 'to' at now-3min to prevent future dates (e.g. endOf('day') on today)
       const maxTo = dayjs.utc().subtract(3, 'minute');
       to = dayjs.utc(to).isAfter(maxTo) ? maxTo.toISOString() : dayjs.utc(to).toISOString();
@@ -47,7 +49,7 @@ const OrdersService = {
       });
 
       const spApi = new SpApiClient(target);
-      let paginationToken = null;
+      let nextToken = null;
       let totalOrders = 0;
       let skipped = 0;
       let page = 0;
@@ -55,19 +57,19 @@ const OrdersService = {
 
       do {
         page++;
-        const response = await spApi.searchOrders({
-          marketplaceIds: [target.amazon_marketplace_id],
-          createdAfter: from,
-          createdBefore: to,
-          paginationToken,
+        const response = await spApi.getOrders({
+          MarketplaceIds: [target.amazon_marketplace_id],
+          CreatedAfter: from,
+          CreatedBefore: to,
+          NextToken: nextToken,
         });
 
-        const orders = response.orders || [];
+        const orders = response.Orders || [];
         totalOrders += orders.length;
 
         for (const order of orders) {
-          const orderId = order.orderId;
-          const orderStatus = order.fulfillment?.fulfillmentStatus || 'UNKNOWN';
+          const orderId = order.AmazonOrderId;
+          const orderStatus = order.OrderStatus || 'UNKNOWN';
 
           // Skip orders already synced with same status (optimization)
           // --force bypasses this check to ensure all SP-API orders are re-processed
@@ -80,8 +82,8 @@ const OrdersService = {
           }
 
           try {
-            // v2026-01-01: items are embedded in the order response
-            const items = order.orderItems || [];
+            // v0: need separate call to get order items
+            const items = await spApi.getOrderItems(orderId);
 
             for (const item of items) {
               processed++;
@@ -91,9 +93,9 @@ const OrdersService = {
               // Upsert ASIN if new
               await this.ensureAsin(
                 target.account_id,
-                item.product?.asin,
-                item.product?.sellerSku,
-                item.product?.title
+                item.ASIN,
+                item.SellerSKU,
+                item.Title
               );
             }
           } catch (itemErr) {
@@ -106,16 +108,16 @@ const OrdersService = {
           }
         }
 
-        paginationToken = response.pagination?.nextToken || null;
+        nextToken = response.NextToken || null;
 
         // Progress logging every page
         logger.info(`Orders sync ${target.country_code}: page ${page}, ${totalOrders} orders seen, ${skipped} skipped, ${processed} processed, ${errors} errors`);
 
         // Throttle between pages to avoid burning SP-API rate-limit tokens
-        if (paginationToken) {
+        if (nextToken) {
           await sleep(2000);
         }
-      } while (paginationToken);
+      } while (nextToken);
 
       // Backfill images for ASINs missing image_url (IT only)
       await this.backfillImages(target, spApi).catch((err) => {
@@ -161,8 +163,16 @@ const OrdersService = {
   },
 
   /**
+   * Helper to extract numeric amount from v0 Money object { CurrencyCode, Amount }.
+   */
+  extractAmount(money) {
+    if (!money) return 0;
+    return parseFloat(money.Amount || 0);
+  },
+
+  /**
    * Upsert a single order item (idempotent via ON CONFLICT).
-   * Adapted for Orders API v2026-01-01 response format.
+   * Adapted for Orders API v0 response format.
    */
   async upsertOrderItem(target, order, item) {
     const result = await db.query(
@@ -186,18 +196,18 @@ const OrdersService = {
       [
         target.account_id,
         target.account_marketplace_id,
-        order.orderId,
-        item.product?.asin,
-        item.product?.sellerSku || null,
-        item.quantityOrdered || 1,
-        this.extractProceeds(item, 'ITEM'),
-        this.extractTaxDetail(item, 'ITEM'),
-        this.extractProceeds(item, 'SHIPPING'),
-        this.extractTaxDetail(item, 'SHIPPING'),
-        this.extractProceeds(item, 'DISCOUNT'),
-        order.fulfillment?.fulfillmentStatus || 'UNKNOWN',
-        order.createdTime,
-        order.proceeds?.grandTotal?.currencyCode || target.currency,
+        order.AmazonOrderId,
+        item.ASIN,
+        item.SellerSKU || null,
+        item.QuantityOrdered || 1,
+        this.extractAmount(item.ItemPrice),
+        this.extractAmount(item.ItemTax),
+        this.extractAmount(item.ShippingPrice),
+        this.extractAmount(item.ShippingTax),
+        this.extractAmount(item.PromotionDiscount),
+        order.OrderStatus || 'UNKNOWN',
+        order.PurchaseDate,
+        order.OrderTotal?.CurrencyCode || target.currency,
         JSON.stringify({ order, item }),
       ]
     );
@@ -217,34 +227,6 @@ const OrdersService = {
          updated_at = NOW()`,
       [accountId, asin, sku || null, title || null]
     );
-  },
-
-  /**
-   * Extract proceeds amount from item breakdowns by type (ITEM, SHIPPING, DISCOUNT, etc.).
-   * v2026-01-01 format: item.proceeds.breakdowns[].type / .subtotal.amount
-   */
-  extractProceeds(item, type) {
-    const breakdowns = item.proceeds?.breakdowns || [];
-    const breakdown = breakdowns.find((b) => b.type === type);
-    return breakdown?.subtotal ? parseFloat(breakdown.subtotal.amount || 0) : 0;
-  },
-
-  /**
-   * Extract detailed tax amount from item breakdowns by subtype (ITEM, SHIPPING, etc.).
-   * v2026-01-01 format: TAX breakdown -> detailedBreakdowns[].subtype / .value.amount
-   */
-  extractTaxDetail(item, subtype) {
-    const breakdowns = item.proceeds?.breakdowns || [];
-    const taxBreakdown = breakdowns.find((b) => b.type === 'TAX');
-    if (!taxBreakdown?.detailedBreakdowns) {
-      // If no detailed breakdowns, return total tax for ITEM subtype, 0 otherwise
-      if (subtype === 'ITEM' && taxBreakdown?.subtotal) {
-        return parseFloat(taxBreakdown.subtotal.amount || 0);
-      }
-      return 0;
-    }
-    const detail = taxBreakdown.detailedBreakdowns.find((d) => d.subtype === subtype);
-    return detail?.value ? parseFloat(detail.value.amount || 0) : 0;
   },
 
   /**

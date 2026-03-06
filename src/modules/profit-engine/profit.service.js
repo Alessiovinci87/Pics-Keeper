@@ -89,7 +89,7 @@ const ProfitService = {
     let processed = 0;
 
     try {
-            logger.info('Starting profit computation', { accountId, marketplaceId, dateFrom, dateTo });
+      logger.info('Starting profit computation', { accountId, marketplaceId, dateFrom, dateTo });
 
       // Resolve marketplace timezone for date boundaries and grouping
       const mpResult = await db.query(
@@ -113,15 +113,20 @@ const ProfitService = {
         [accountId, marketplaceId, dateFrom, dateTo, tz]
       );
 
-      // Pre-fetch financial events (widen by 30 days each side — financial events
-      // typically lag 7-14 days behind order purchase_date)
-      const dayjs = require('dayjs');
-      const feeFrom = dayjs.utc(dateFrom).subtract(30, 'day').format('YYYY-MM-DD');
-      const feeTo = dayjs.utc(dateTo).add(30, 'day').format('YYYY-MM-DD');
-      const feeMap = await this.buildFeeMap(accountId, marketplaceId, feeFrom, feeTo);
+      // Pre-fetch financial events for the specific orders we're processing
+      const orderIds = ordersResult.rows.map(o => o.amazon_order_id);
+      const feeMap = await this.buildFeeMap(accountId, marketplaceId, orderIds);
 
       // Pre-fetch ASIN costs
       const costsMap = await this.buildCostsMap(accountId, marketplaceId);
+
+      // Diagnostic: warn if no product costs configured (profit will be overstated)
+      if (Object.keys(costsMap).length === 0 && ordersResult.rows.length > 0) {
+        logger.warn('No product costs configured for this marketplace — profit will be overstated', {
+          accountId, marketplaceId,
+          hint: 'Configure costs via POST /api/asin-costs or the Costi Prodotto page',
+        });
+      }
 
       // Pre-fetch units sold per ASIN per day (for ads allocation, timezone-aware)
       const unitsByDay = await this.buildUnitsByDayMap(accountId, marketplaceId, dateFrom, dateTo, tz);
@@ -129,6 +134,29 @@ const ProfitService = {
       // Pre-fetch storage allocation data (units sold per ASIN this month, timezone-aware)
       const storageMap = await this.buildStorageMap(accountId, marketplaceId, dateFrom, dateTo, tz);
 
+      // Diagnostic: warn if no ads data exists (PPC will show as 0)
+      if (ordersResult.rows.length > 0) {
+        const adsCheck = await db.query(
+          `SELECT COUNT(*) FROM ads_daily_spend
+           WHERE account_id = $1 AND marketplace_id = $2
+             AND spend_date >= $3 AND spend_date < $4`,
+          [accountId, marketplaceId, dateFrom, dateTo]
+        );
+        if (parseInt(adsCheck.rows[0].count, 10) === 0) {
+          logger.warn('No ads data found for this marketplace+period — PPC will show as 0', {
+            accountId, marketplaceId, dateFrom, dateTo,
+            hint: 'Ensure ads_profile_ids are configured in the account and ads sync has run',
+          });
+        }
+      }
+
+      // Diagnostic: warn if no financial events exist (fees will be 0)
+      if (orderIds.length > 0 && Object.keys(feeMap).length === 0) {
+        logger.warn('No financial events found for any orders — Amazon fees will be 0', {
+          accountId, marketplaceId, ordersCount: orderIds.length,
+          hint: 'Financial events sync may not have completed yet',
+        });
+      }
 
       for (const order of ordersResult.rows) {
         await this.computeOrderProfit(order, feeMap, costsMap, unitsByDay, storageMap);
@@ -199,16 +227,23 @@ const ProfitService = {
 
   /**
    * Build a map of Amazon fees by order_id:asin -> fee_type -> amount.
+   * Queries by specific order IDs (not date range) to avoid PostedDate vs PurchaseDate mismatch.
    *
    * CRITICAL FIX: Only includes actual fees (amount < 0) from financial events.
    * Excludes revenue charge types (Principal, Tax, ShippingCharge, etc.)
    * which were previously being counted as "otherFees" and inflating costs.
+   *
+   * JOIN with orders_raw to resolve SellerSKU -> ASIN.
+   * SP-API financial events often store SellerSKU (e.g. "68-YM50-I8G3")
+   * instead of ASIN (e.g. "B0BY9Q4KTT"). Without this resolution,
+   * the fee lookup key won't match the order's ASIN.
    */
-  async buildFeeMap(accountId, marketplaceId, dateFrom, dateTo) {
-    // JOIN with orders_raw to resolve SellerSKU → ASIN.
-    // SP-API financial events often store SellerSKU (e.g. "68-YM50-I8G3")
-    // instead of ASIN (e.g. "B0BY9Q4KTT"). Without this resolution,
-    // the fee lookup key won't match the order's ASIN.
+  async buildFeeMap(accountId, marketplaceId, orderIds) {
+    if (orderIds.length === 0) return {};
+
+    // Deduplicate order IDs
+    const uniqueOrderIds = [...new Set(orderIds)];
+
     const result = await db.query(
       `SELECT fe.amazon_order_id,
               COALESCE(o.asin, fe.asin) AS asin,
@@ -220,11 +255,11 @@ const ProfitService = {
          AND o.account_id = fe.account_id
          AND (o.asin = fe.asin OR o.sku = fe.asin)
        WHERE fe.account_id = $1 AND fe.marketplace_id = $2
-         AND fe.event_date >= $3 AND fe.event_date < $4
+         AND fe.amazon_order_id = ANY($3)
          AND fe.event_type = 'ShipmentEvent'
          AND fe.amount < 0
        GROUP BY fe.amazon_order_id, COALESCE(o.asin, fe.asin), fe.fee_type`,
-      [accountId, marketplaceId, dateFrom, dateTo]
+      [accountId, marketplaceId, uniqueOrderIds]
     );
 
     const map = {};
@@ -276,7 +311,6 @@ const ProfitService = {
       [accountId, marketplaceId, dateFrom, dateTo, tz]
     );
 
-
     const map = {};
     for (const row of result.rows) {
       const key = `${row.asin}:${toDateStr(row.order_date)}`;
@@ -301,7 +335,6 @@ const ProfitService = {
        GROUP BY asin, DATE_TRUNC('month', (purchase_date AT TIME ZONE $5)::date)`,
       [accountId, marketplaceId, dateFrom, dateTo, tz]
     );
-
 
     const map = {};
     for (const row of result.rows) {
@@ -423,6 +456,7 @@ const ProfitService = {
         fba_fee = EXCLUDED.fba_fee,
         other_amazon_fees = EXCLUDED.other_amazon_fees,
         marketplace_facilitator_tax = EXCLUDED.marketplace_facilitator_tax,
+        refund_amount = EXCLUDED.refund_amount,
         ads_allocated = EXCLUDED.ads_allocated,
         product_cost = EXCLUDED.product_cost,
         inbound_cost = EXCLUDED.inbound_cost,
@@ -464,15 +498,18 @@ const ProfitService = {
       [accountId, marketplaceId, dateFrom, dateTo]
     );
 
+    let applied = 0;
+
     for (const refund of refunds.rows) {
       if (!refund.amazon_order_id) continue;
 
       const refundAmount = round(Math.abs(parseFloat(refund.refund_total)), 4);
-      const asin = refund.asin;
 
-      if (asin) {
-        // Direct match: update the specific order+ASIN profit record
-        await db.query(
+      // Update the order_profit record with refund amount, then recalculate totals.
+      let result;
+      if (refund.asin) {
+        // Exact match by order_id + asin
+        result = await db.query(
           `UPDATE order_profit SET
             refund_amount = $1,
             total_costs = referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
@@ -487,13 +524,19 @@ const ProfitService = {
                   ads_allocated + product_cost + inbound_cost + customs_cost +
                   prep_cost + packaging_cost + storage_allocated + $1)) / revenue) * 100, 4)))
               ELSE 0 END,
+            roi_pct = CASE WHEN (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated) > 0
+              THEN LEAST(9999.9999, GREATEST(-9999.9999,
+                ROUND(((revenue - (referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                  ads_allocated + product_cost + inbound_cost + customs_cost +
+                  prep_cost + packaging_cost + storage_allocated + $1)) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4)))
+              ELSE 0 END,
             computed_at = NOW()
           WHERE account_id = $2 AND amazon_order_id = $3 AND asin = $4`,
-          [refundAmount, accountId, refund.amazon_order_id, asin]
+          [refundAmount, accountId, refund.amazon_order_id, refund.asin]
         );
       } else {
-        // Fallback: ASIN not resolved. Allocate to the line with highest revenue.
-        await db.query(
+        // NULL asin (SKU resolution failed) — apply to the highest-revenue line item
+        result = await db.query(
           `UPDATE order_profit SET
             refund_amount = $1,
             total_costs = referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
@@ -507,6 +550,12 @@ const ProfitService = {
                 ROUND(((revenue - (referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
                   ads_allocated + product_cost + inbound_cost + customs_cost +
                   prep_cost + packaging_cost + storage_allocated + $1)) / revenue) * 100, 4)))
+              ELSE 0 END,
+            roi_pct = CASE WHEN (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated) > 0
+              THEN LEAST(9999.9999, GREATEST(-9999.9999,
+                ROUND(((revenue - (referral_fee + fba_fee + other_amazon_fees + marketplace_facilitator_tax +
+                  ads_allocated + product_cost + inbound_cost + customs_cost +
+                  prep_cost + packaging_cost + storage_allocated + $1)) / (product_cost + inbound_cost + customs_cost + prep_cost + packaging_cost + storage_allocated + ads_allocated)) * 100, 4)))
               ELSE 0 END,
             computed_at = NOW()
           WHERE id = (
@@ -518,12 +567,15 @@ const ProfitService = {
           [refundAmount, accountId, refund.amazon_order_id]
         );
       }
+
+      if (result.rowCount > 0) applied++;
     }
 
     logger.info('Refunds processed', {
       accountId,
       marketplaceId,
       refundsCount: refunds.rows.length,
+      applied,
     });
   },
 

@@ -92,12 +92,18 @@ const AccountService = {
     const values = [];
     let idx = 1;
 
-    const allowedFields = ['name', 'sp_api_refresh_token', 'sp_api_refresh_token_na', 'ads_api_refresh_token', 'ads_profile_ids', 'is_active'];
+    const allowedFields = ['name', 'seller_id', 'sp_api_refresh_token', 'sp_api_refresh_token_na', 'ads_api_refresh_token', 'ads_profile_ids', 'is_active'];
+    const jsonbFields = ['ads_profile_ids'];
     for (const [key, value] of Object.entries(updates)) {
       const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase(); // camelCase -> snake_case
       if (allowedFields.includes(dbKey)) {
-        fields.push(`${dbKey} = $${idx}`);
-        values.push(value);
+        if (jsonbFields.includes(dbKey)) {
+          fields.push(`${dbKey} = $${idx}::jsonb`);
+          values.push(typeof value === 'string' ? value : JSON.stringify(value));
+        } else {
+          fields.push(`${dbKey} = $${idx}`);
+          values.push(value);
+        }
         idx++;
       }
     }
@@ -113,6 +119,31 @@ const AccountService = {
     );
     if (result.rows.length === 0) throw new NotFoundError('Account');
     return result.rows[0];
+  },
+
+  /**
+   * Delete an account and all its related data.
+   */
+  async remove(id) {
+    return db.transaction(async (client) => {
+      // Delete related data first (foreign key cascade should handle most, but be explicit)
+      await client.query('DELETE FROM account_marketplaces WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM sync_log WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM alerts WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM alert_thresholds WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM payout_reconciliation WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM order_profit WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM asin_daily_metrics WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM account_daily_kpi WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM ads_daily_spend WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM financial_events_raw WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM orders_raw WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM asin_costs WHERE account_id = $1', [id]);
+      await client.query('DELETE FROM asins WHERE account_id = $1', [id]);
+      const result = await client.query('DELETE FROM accounts WHERE id = $1 RETURNING id', [id]);
+      if (result.rows.length === 0) throw new NotFoundError('Account');
+      logger.info('Account deleted', { accountId: id });
+    });
   },
 
   /**
@@ -162,6 +193,50 @@ const AccountService = {
        WHERE account_id = $2 AND marketplace_id = $3`,
       [timestamp, accountId, marketplaceId]
     );
+  },
+
+  /**
+   * Reset sync timestamps for an account+marketplace to force a full re-sync.
+   * If marketplaceId is null, resets all marketplaces for the account.
+   * syncTypes: array of 'orders', 'financial', 'ads' (default: all).
+   */
+  async resetSyncTimestamps(accountId, marketplaceId = null, syncTypes = ['orders', 'financial', 'ads']) {
+    const columnMap = {
+      orders: 'last_orders_sync_at',
+      financial: 'last_financial_sync_at',
+      ads: 'last_ads_sync_at',
+    };
+
+    const setClauses = syncTypes
+      .map((t) => columnMap[t])
+      .filter(Boolean)
+      .map((col) => `${col} = NULL`);
+
+    if (setClauses.length === 0) return;
+
+    setClauses.push("sync_status = 'idle'");
+
+    const conditions = ['account_id = $1'];
+    const params = [accountId];
+
+    if (marketplaceId) {
+      conditions.push('marketplace_id = $2');
+      params.push(marketplaceId);
+    }
+
+    const result = await db.query(
+      `UPDATE account_marketplaces SET ${setClauses.join(', ')} WHERE ${conditions.join(' AND ')} RETURNING marketplace_id`,
+      params
+    );
+
+    logger.info('Sync timestamps reset', {
+      accountId,
+      marketplaceId: marketplaceId || 'all',
+      syncTypes,
+      affected: result.rowCount,
+    });
+
+    return result.rowCount;
   },
 
   /**

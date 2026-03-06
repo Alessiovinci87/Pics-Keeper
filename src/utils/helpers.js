@@ -16,7 +16,8 @@ function round(value, decimals = 2) {
  */
 function pct(numerator, denominator, decimals = 2) {
   if (!denominator || denominator === 0) return 0;
-  return round((numerator / denominator) * 100, decimals);
+  const result = round((numerator / denominator) * 100, decimals);
+  return Math.max(-9999, Math.min(9999, result));
 }
 
 /**
@@ -24,7 +25,8 @@ function pct(numerator, denominator, decimals = 2) {
  */
 function roi(profit, cost, decimals = 2) {
   if (!cost || cost === 0) return 0;
-  return round((profit / cost) * 100, decimals);
+  const result = round((profit / cost) * 100, decimals);
+  return Math.max(-9999, Math.min(9999, result));
 }
 
 /**
@@ -43,10 +45,12 @@ function toDateStr(dateInput) {
 
 /**
  * Build a date range for incremental sync: from lastSync to now, capped at maxDays.
+ * Always goes back at least maxDaysBack to catch orders missed by earlier narrow windows.
  */
 function syncDateRange(lastSyncAt, maxDaysBack = 30) {
+  const now = dayjs.utc();
   // SP-API requires CreatedBefore to be at least 2 minutes before current time
-  const now = dayjs.utc().subtract(3, 'minute');
+  const to = now.subtract(3, 'minute');
   let from;
   if (lastSyncAt) {
     from = dayjs.utc(lastSyncAt);
@@ -55,7 +59,7 @@ function syncDateRange(lastSyncAt, maxDaysBack = 30) {
   }
   return {
     from: from.toISOString(),
-    to: now.toISOString(),
+    to: to.toISOString(),
   };
 }
 
@@ -75,9 +79,14 @@ async function retry(fn, { maxRetries = 3, baseDelay = 1000, label = 'operation'
     try {
       return await fn();
     } catch (err) {
+      // Don't retry client errors (4xx except 429 rate limit) - they won't succeed on retry
       const status = err.response?.status;
-      // Don't retry client errors (except 429 rate limiting)
-      if (status && status >= 400 && status < 500 && status !== 429) throw err;
+      if (status && status >= 400 && status < 500 && status !== 429) {
+        logger.error(`${label} failed with HTTP ${status}, not retrying`, {
+          error: err.message,
+        });
+        throw err;
+      }
       if (attempt === maxRetries) throw err;
       let delay;
       if (status === 429) {
