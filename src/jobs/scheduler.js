@@ -78,12 +78,20 @@ async function syncOrdersJob(options = {}) {
 async function syncFinancialJob() {
   await withLock('sync-financial', async () => {
     const targets = await AccountService.getActiveSyncTargets();
+    const processedAccounts = new Set();
     for (const target of targets) {
       try {
-        await FinancialService.syncFinancialEvents(target);
-        await AccountService.updateSyncTimestamp(
-          target.account_id, target.account_marketplace_id, 'financial', new Date().toISOString()
-        );
+        const result = await FinancialService.syncFinancialEvents(target, processedAccounts);
+        if (!result.skipped) {
+          // Update timestamp for ALL marketplaces of this account at once
+          const accountTargets = targets.filter(t => t.account_id === target.account_id);
+          const now = new Date().toISOString();
+          for (const t of accountTargets) {
+            await AccountService.updateSyncTimestamp(
+              t.account_id, t.account_marketplace_id, 'financial', now
+            );
+          }
+        }
       } catch (err) {
         logger.error('Financial sync failed for target', {
           accountId: target.account_id,
