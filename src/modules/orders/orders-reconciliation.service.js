@@ -17,6 +17,8 @@ dayjs.extend(utc);
  *
  * This is purely ADDITIVE — it never modifies or deletes existing records.
  */
+const OrdersService = require('./orders.service');
+
 const OrdersReconciliationService = {
   REPORT_TYPE: 'GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL',
   POLL_INTERVAL_MS: 15000,
@@ -200,6 +202,11 @@ const OrdersReconciliationService = {
         const currency = row['currency'] || target.currency;
         const sku = row['sku'] || null;
 
+        // Resolve actual marketplace from sales-channel
+        const salesChannel = row['sales-channel'];
+        const resolvedMpId = await OrdersService.resolveSalesChannel(salesChannel);
+        const marketplaceId = resolvedMpId || target.account_marketplace_id;
+
         await db.query(
           `INSERT INTO orders_raw (
             account_id, marketplace_id, amazon_order_id, asin, sku,
@@ -209,7 +216,7 @@ const OrdersReconciliationService = {
           ON CONFLICT (account_id, amazon_order_id, asin) DO NOTHING`,
           [
             target.account_id,
-            target.account_marketplace_id,
+            marketplaceId,
             amazonOrderId,
             asin,
             sku,

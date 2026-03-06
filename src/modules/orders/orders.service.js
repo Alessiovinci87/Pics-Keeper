@@ -19,6 +19,29 @@ const OrdersService = {
   POLL_INTERVAL_MS: 15000,
   MAX_POLL_ATTEMPTS: 40, // ~10 minutes max
 
+  // Cache: sales-channel name → marketplaces.id  (e.g. "Amazon.it" → 3)
+  _salesChannelCache: null,
+
+  /**
+   * Resolve a sales-channel string (e.g. "Amazon.it") to a marketplaces.id.
+   * Uses a cached lookup loaded once from the DB.
+   * Returns null if not found.
+   */
+  async resolveSalesChannel(salesChannel) {
+    if (!salesChannel) return null;
+
+    if (!this._salesChannelCache) {
+      const result = await db.query('SELECT id, name FROM marketplaces');
+      this._salesChannelCache = {};
+      for (const row of result.rows) {
+        this._salesChannelCache[row.name] = row.id;
+      }
+      logger.debug('Sales-channel cache loaded', { entries: Object.keys(this._salesChannelCache) });
+    }
+
+    return this._salesChannelCache[salesChannel] || null;
+  },
+
   /**
    * Sync orders for a single account+marketplace.
    */
@@ -216,6 +239,22 @@ const OrdersService = {
     const currency = row['currency'] || target.currency;
     const sku = row['sku'] || null;
 
+    // Resolve actual marketplace from sales-channel (e.g. "Amazon.fr" → FR marketplace_id).
+    // For unified EU accounts, the report includes orders from ALL EU marketplaces,
+    // so we must use the sales-channel to attribute each order correctly.
+    const salesChannel = row['sales-channel'];
+    const resolvedMpId = await this.resolveSalesChannel(salesChannel);
+    const marketplaceId = resolvedMpId || target.account_marketplace_id;
+
+    if (resolvedMpId && resolvedMpId !== target.account_marketplace_id) {
+      logger.debug('Order attributed to different marketplace via sales-channel', {
+        amazonOrderId: row['amazon-order-id'],
+        salesChannel,
+        resolvedMpId,
+        targetMpId: target.account_marketplace_id,
+      });
+    }
+
     const result = await db.query(
       `INSERT INTO orders_raw (
         account_id, marketplace_id, amazon_order_id, asin, sku,
@@ -236,7 +275,7 @@ const OrdersService = {
       RETURNING (xmax = 0) AS is_insert`,
       [
         target.account_id,
-        target.account_marketplace_id,
+        marketplaceId,
         row['amazon-order-id'],
         row['asin'],
         sku,
