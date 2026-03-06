@@ -428,4 +428,132 @@ router.get(
   }
 );
 
+/**
+ * GET /api/diagnostics/revenue-breakdown
+ * Per-marketplace revenue breakdown from all 3 data layers:
+ * orders_raw, order_profit, asin_daily_metrics.
+ * Detects cross-marketplace duplication.
+ *
+ * Query params:
+ *   accountId (required), date (required, YYYY-MM-DD)
+ *
+ * Example:
+ *   /api/diagnostics/revenue-breakdown?accountId=1&date=2026-03-03
+ */
+router.get(
+  '/revenue-breakdown',
+  validate({ query: ['accountId', 'date'] }),
+  async (req, res, next) => {
+    try {
+      const db = require('../database/pool');
+      const accountId = parseInt(req.query.accountId, 10);
+      const { date } = req.query;
+
+      const dayjs = require('dayjs');
+      const nextDate = dayjs(date).add(1, 'day').format('YYYY-MM-DD');
+
+      // Layer 1: orders_raw per marketplace (timezone-aware)
+      const ordersRaw = await db.query(
+        `SELECT m.country_code,
+                COUNT(*) AS order_lines,
+                SUM(o.quantity) AS units,
+                SUM(o.item_price) AS item_price_total,
+                SUM(o.item_tax) AS item_tax_total,
+                SUM(o.shipping_price) AS shipping_total,
+                SUM(o.shipping_tax) AS shipping_tax_total,
+                SUM(o.promotion_discount) AS promo_discount_total,
+                SUM(o.item_price + o.item_tax + o.shipping_price + o.shipping_tax - o.promotion_discount) AS gross_revenue
+         FROM orders_raw o
+         JOIN marketplaces m ON m.id = o.marketplace_id
+         WHERE o.account_id = $1
+           AND (o.purchase_date AT TIME ZONE COALESCE($3, 'UTC'))::date = $2::date
+           AND UPPER(o.order_status) NOT IN ('CANCELLED', 'CANCELED')
+         GROUP BY m.country_code
+         ORDER BY gross_revenue DESC`,
+        [accountId, date, 'Europe/Rome']
+      );
+
+      // Layer 2: order_profit per marketplace
+      const orderProfit = await db.query(
+        `SELECT m.country_code,
+                COUNT(*) AS order_lines,
+                SUM(op.quantity) AS units,
+                SUM(op.revenue) AS revenue,
+                SUM(op.referral_fee) AS referral_fee,
+                SUM(op.fba_fee) AS fba_fee,
+                SUM(op.other_amazon_fees) AS other_fees,
+                SUM(op.net_profit) AS net_profit
+         FROM order_profit op
+         JOIN marketplaces m ON m.id = op.marketplace_id
+         WHERE op.account_id = $1
+           AND op.order_date = $2
+         GROUP BY m.country_code
+         ORDER BY revenue DESC`,
+        [accountId, date]
+      );
+
+      // Layer 3: asin_daily_metrics per marketplace
+      const asinMetrics = await db.query(
+        `SELECT m.country_code,
+                COUNT(*) AS asin_rows,
+                SUM(adm.units_sold) AS units,
+                SUM(adm.revenue) AS revenue,
+                SUM(adm.total_amazon_fees) AS total_amazon_fees,
+                SUM(adm.net_profit) AS net_profit
+         FROM asin_daily_metrics adm
+         JOIN marketplaces m ON m.id = adm.marketplace_id
+         WHERE adm.account_id = $1
+           AND adm.metric_date = $2
+         GROUP BY m.country_code
+         ORDER BY revenue DESC`,
+        [accountId, date]
+      );
+
+      // Layer 3b: check for NULL marketplace_id rows (cross-marketplace totals that shouldn't exist)
+      const nullMpMetrics = await db.query(
+        `SELECT COUNT(*) AS null_mp_rows,
+                SUM(adm.units_sold) AS units,
+                SUM(adm.revenue) AS revenue
+         FROM asin_daily_metrics adm
+         WHERE adm.account_id = $1
+           AND adm.metric_date = $2
+           AND adm.marketplace_id IS NULL`,
+        [accountId, date]
+      );
+
+      // Totals
+      const totals = {
+        orders_raw: {
+          order_lines: ordersRaw.rows.reduce((s, r) => s + parseInt(r.order_lines), 0),
+          units: ordersRaw.rows.reduce((s, r) => s + parseInt(r.units), 0),
+          gross_revenue: ordersRaw.rows.reduce((s, r) => s + parseFloat(r.gross_revenue || 0), 0),
+        },
+        order_profit: {
+          order_lines: orderProfit.rows.reduce((s, r) => s + parseInt(r.order_lines), 0),
+          units: orderProfit.rows.reduce((s, r) => s + parseInt(r.units), 0),
+          revenue: orderProfit.rows.reduce((s, r) => s + parseFloat(r.revenue || 0), 0),
+        },
+        asin_daily_metrics: {
+          asin_rows: asinMetrics.rows.reduce((s, r) => s + parseInt(r.asin_rows), 0),
+          units: asinMetrics.rows.reduce((s, r) => s + parseInt(r.units), 0),
+          revenue: asinMetrics.rows.reduce((s, r) => s + parseFloat(r.revenue || 0), 0),
+        },
+      };
+
+      res.json({
+        params: { accountId, date },
+        totals,
+        null_marketplace_rows: nullMpMetrics.rows[0],
+        per_marketplace: {
+          orders_raw: ordersRaw.rows,
+          order_profit: orderProfit.rows,
+          asin_daily_metrics: asinMetrics.rows,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
