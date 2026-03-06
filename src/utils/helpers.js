@@ -53,6 +53,14 @@ function syncDateRange(lastSyncAt, maxDaysBack = 30) {
   } else {
     from = now.subtract(maxDaysBack, 'day');
   }
+
+  // Guard: if from >= to (can happen when last_sync_at was set to NOW()
+  // and we re-trigger within the 3-minute safety buffer), push from back
+  // by 5 minutes so the API gets a valid (small) date range.
+  if (from.isSame(now) || from.isAfter(now)) {
+    from = now.subtract(5, 'minute');
+  }
+
   return {
     from: from.toISOString(),
     to: now.toISOString(),

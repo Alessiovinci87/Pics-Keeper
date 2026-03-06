@@ -83,12 +83,14 @@ async function syncFinancialJob() {
       try {
         const result = await FinancialService.syncFinancialEvents(target, processedAccounts);
         if (!result.skipped) {
-          // Update timestamp for ALL marketplaces of this account at once
+          // Update timestamp for ALL marketplaces of this account at once.
+          // Use the actual 'to' date from the sync range (not NOW()) to prevent
+          // the next sync from having from > to when triggered within 3 minutes.
           const accountTargets = targets.filter(t => t.account_id === target.account_id);
-          const now = new Date().toISOString();
+          const syncTs = result.syncedTo || new Date().toISOString();
           for (const t of accountTargets) {
             await AccountService.updateSyncTimestamp(
-              t.account_id, t.account_marketplace_id, 'financial', now
+              t.account_id, t.account_marketplace_id, 'financial', syncTs
             );
           }
         }

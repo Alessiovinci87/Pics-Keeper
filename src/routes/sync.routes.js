@@ -371,4 +371,33 @@ router.get('/log', validate({ query: ['accountId'] }), async (req, res, next) =>
   }
 });
 
+/**
+ * POST /api/sync/reset-financial
+ * Reset last_financial_sync_at to NULL for all marketplaces of an account,
+ * forcing the next financial sync to fetch the full 30-day window.
+ * Body: { accountId }
+ */
+router.post('/reset-financial', async (req, res, next) => {
+  try {
+    const { accountId } = req.body;
+    if (!accountId) {
+      return res.status(400).json({ error: { message: 'accountId is required' } });
+    }
+
+    const result = await db.query(
+      `UPDATE account_marketplaces
+       SET last_financial_sync_at = NULL
+       WHERE account_id = $1`,
+      [parseInt(accountId, 10)]
+    );
+
+    res.json({
+      message: `Reset last_financial_sync_at for ${result.rowCount} marketplace(s)`,
+      accountId: parseInt(accountId, 10),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

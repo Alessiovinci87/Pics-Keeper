@@ -115,7 +115,7 @@ const FinancialService = {
         inserted,
       });
 
-      return { processed, inserted };
+      return { processed, inserted, syncedTo: to };
     } catch (err) {
       await SyncLogger.fail(syncLog.id, err.message);
       logger.error('Financial sync failed', {
