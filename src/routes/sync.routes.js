@@ -209,6 +209,7 @@ router.post('/trigger/orders/:countryCode', async (req, res, next) => {
     }
     if (req.body && req.body.dateTo) {
       options.dateTo = req.body.dateTo;
+    }
     if (req.body && req.body.force) {
       options.force = true;
     }
