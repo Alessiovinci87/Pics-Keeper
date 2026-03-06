@@ -17,6 +17,7 @@ const router = Router();
 router.get('/', validate({ query: ['accountId'] }), async (req, res, next) => {
   try {
     const accountId = parseInt(req.query.accountId, 10);
+    const countryCode = req.query.countryCode || null;
     const dateFrom = req.query.dateFrom || null;
     const dateTo = req.query.dateTo || null;
     const page = parseInt(req.query.page, 10) || 1;
@@ -26,6 +27,13 @@ router.get('/', validate({ query: ['accountId'] }), async (req, res, next) => {
     const conditions = ['adm.account_id = $1'];
     const params = [accountId];
     let idx = 2;
+
+    // Filter by marketplace if countryCode provided
+    if (countryCode) {
+      conditions.push(`adm.marketplace_id = (SELECT id FROM marketplaces WHERE country_code = $${idx})`);
+      params.push(countryCode.toUpperCase());
+      idx++;
+    }
 
     if (dateFrom) {
       conditions.push(`adm.metric_date >= $${idx}`);
@@ -84,6 +92,27 @@ router.get('/', validate({ query: ['accountId'] }), async (req, res, next) => {
 
     let marketplaceBreakdown = {};
     if (asins.length > 0) {
+      // Build dynamic params for breakdown query
+      const brkParams = [accountId, asins];
+      const brkConditions = ['adm.account_id = $1', 'adm.asin = ANY($2)'];
+      let brkIdx = 3;
+
+      if (countryCode) {
+        brkConditions.push(`m.country_code = $${brkIdx}`);
+        brkParams.push(countryCode.toUpperCase());
+        brkIdx++;
+      }
+      if (dateFrom) {
+        brkConditions.push(`adm.metric_date >= $${brkIdx}`);
+        brkParams.push(dateFrom);
+        brkIdx++;
+      }
+      if (dateTo) {
+        brkConditions.push(`adm.metric_date <= $${brkIdx}`);
+        brkParams.push(dateTo);
+        brkIdx++;
+      }
+
       const breakdownResult = await db.query(
         `SELECT
           adm.asin,
@@ -109,13 +138,10 @@ router.get('/', validate({ query: ['accountId'] }), async (req, res, next) => {
             ELSE 0 END AS tacos_pct
         FROM asin_daily_metrics adm
         JOIN marketplaces m ON m.id = adm.marketplace_id
-        WHERE adm.account_id = $1
-          AND adm.asin = ANY($2)
-          ${dateFrom ? `AND adm.metric_date >= $3` : ''}
-          ${dateTo ? `AND adm.metric_date <= $${dateFrom ? 4 : 3}` : ''}
+        WHERE ${brkConditions.join(' AND ')}
         GROUP BY adm.asin, m.country_code, m.name, m.currency
         ORDER BY adm.asin, SUM(adm.revenue) DESC`,
-        [accountId, asins, ...(dateFrom ? [dateFrom] : []), ...(dateTo ? [dateTo] : [])]
+        brkParams
       );
 
       // Group breakdown by ASIN
